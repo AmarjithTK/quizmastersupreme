@@ -71,7 +71,8 @@ export type BackupPayload = {
   tables: Record<TableName, Record<string, unknown>[]>;
 };
 
-const CHUNK_ROWS = 4;
+/** D1 ceiling is ~100 bound params; a safe budget is 90 (PLAN.md §0.1). */
+const MAX_BOUND_PARAMS = 90;
 
 export type BackupDb = DrizzleD1Database<typeof schema>;
 
@@ -116,10 +117,14 @@ export async function importDatabase(
 
   for (const name of TABLE_ORDER) {
     const rows = payload.tables[name] ?? [];
-    for (let i = 0; i < rows.length; i += CHUNK_ROWS) {
+    // Chunk per table from its ACTUAL column count — bound params per row can
+    // never exceed the column count, so this is safe regardless of nulls
+    // (ai_candidates has 26 columns; ai_generation_jobs has 33).
+    const perChunk = Math.max(1, Math.floor(MAX_BOUND_PARAMS / Math.max(1, Object.keys(TABLES[name]).length)));
+    for (let i = 0; i < rows.length; i += perChunk) {
       await database
         .insert(TABLES[name] as never)
-        .values(rows.slice(i, i + CHUNK_ROWS) as never);
+        .values(rows.slice(i, i + perChunk) as never);
     }
     restored[name] = rows.length;
   }

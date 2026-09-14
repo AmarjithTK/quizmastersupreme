@@ -450,8 +450,14 @@ async function ingestStage(job: AiGenerationJob, deps: GenerationDeps): Promise<
     });
   }
 
-  // 17 columns per row → keep each statement under the parameter ceiling.
-  const perChunk = Math.max(1, Math.floor(MAX_BOUND_PARAMS / 17));
+  // D1's ~100 bound-parameter ceiling is the hard constraint, and the column
+  // count per row has DRIFTED before (17 → 26), silently breaking 5-row chunks
+  // at 110 params. The bulletproof chunk size derives from the table's ACTUAL
+  // column count: bound params per row can never exceed the number of columns,
+  // so rowsPerChunk × columns is a safe upper bound regardless of nulls
+  // (drizzle inlines null as a literal and binds only non-null values).
+  const columnsPerRow = Object.keys(aiCandidates).length;
+  const perChunk = Math.max(1, Math.floor(MAX_BOUND_PARAMS / Math.max(1, columnsPerRow)));
   for (let i = 0; i < rows.length; i += perChunk) {
     await db().insert(aiCandidates).values(rows.slice(i, i + perChunk));
   }

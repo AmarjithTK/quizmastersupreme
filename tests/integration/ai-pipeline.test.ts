@@ -488,3 +488,30 @@ describe("provider routing forwarding (only/order)", () => {
     await db().delete(schema.aiGenerationJobs).where(eq(schema.aiGenerationJobs.id, job.id)).run();
   });
 });
+
+describe("large batches (D1 parameter ceiling)", () => {
+  it("ingests 10 candidates in one job — the chunking must respect the ~100-param ceiling", async () => {
+    const job = await createGenerationJob(
+      { topic: TOPIC, brief: "Write test questions.", requestedCount: 10, model: "stub/model" },
+      ACTOR,
+    );
+
+    const questions = Array.from({ length: 10 }, (_, i) =>
+      question(`Large batch question number ${i + 1}?`),
+    );
+    const d = deps(envelope(...questions));
+    await runGenerationStep(job.id, d);
+    await runGenerationStep(job.id, d);
+
+    const candidates = await listCandidates({ jobId: job.id });
+    expect(candidates).toHaveLength(10);
+    expect(candidates.every((c) => c.validationStatus === "valid")).toBe(true);
+
+    const stored = await getJob(job.id);
+    expect(stored.status).toBe("succeeded");
+    expect(stored.producedCount).toBe(10);
+
+    await db().delete(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, job.id)).run();
+    await db().delete(schema.aiGenerationJobs).where(eq(schema.aiGenerationJobs.id, job.id)).run();
+  });
+});
