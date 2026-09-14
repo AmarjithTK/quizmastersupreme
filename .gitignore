@@ -8,3 +8,7 @@ next-env.d.ts
 .wrangler/
 .tooling/
 *.log
+
+# local build artifacts
+tsconfig.tsbuildinfo
+.vinext/

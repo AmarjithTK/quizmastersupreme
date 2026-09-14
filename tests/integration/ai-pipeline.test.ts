@@ -13,11 +13,12 @@
 import { eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { getPlatformProxy } from "wrangler";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { db, setDbForTests } from "@/db/client";
 import * as schema from "@/db/schema";
 import {
   createGenerationJob,
+  promptVersionStats,
   getJob,
   listCandidates,
   promoteCandidate,
@@ -367,3 +368,68 @@ describe("promotion", () => {
     });
   });
 });
+async function resetAiTables(): Promise<void> {
+  const jobs = await db().select({ id: schema.aiGenerationJobs.id }).from(schema.aiGenerationJobs);
+  for (const job of jobs) {
+    await db().delete(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, job.id)).run();
+    await db().delete(schema.aiGenerationJobs).where(eq(schema.aiGenerationJobs.id, job.id)).run();
+  }
+}
+
+describe("promptVersionStats — M13 acceptance reporting", () => {
+  beforeEach(resetAiTables);
+
+  it("breaks down decisions by prompt_version, excluding pending from the denominator", async () => {
+    // Seed one job + candidates directly (no LLM needed) under a unique topic.
+    const uid = `stats_${Date.now()}`;
+    const job = await createGenerationJob(
+      {
+        topic: uid,
+        brief: "Make questions.",
+        requestedCount: 4,
+        model: "stub",
+        subtopics: null,
+        avoidTopics: null,
+        difficulty: "easy",
+        targetCategoryId: null,
+        targetSetId: null,
+      },
+      ACTOR,
+    );
+    // Insert 4 candidates: 2 approved, 1 rejected, 1 pending → acceptance 2/3.
+    const base = { jobId: job.id, optionsJson: '[{"key":"A","body":"x"}]', correctOptionKey: "A", explanation: "e", backstory: "b", topic: uid, validationStatus: "valid", dedupeStatus: "clean" };
+    for (let i = 0; i < 4; i++) {
+      await db().insert(schema.aiCandidates).values({ ...base, id: `${job.id}_c${i}`, stem: `Stem ${uid} ${i}?`, createdAt: Date.now() }).run();
+    }
+    const cands = await db().select({ id: schema.aiCandidates.id }).from(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, job.id)).all();
+    await reviewCandidate(cands[0]!.id, "approved", ACTOR);
+    await reviewCandidate(cands[1]!.id, "approved", ACTOR);
+    await reviewCandidate(cands[2]!.id, "rejected", ACTOR);
+
+    const stats = await promptVersionStats();
+    const row = stats.find((r) => r.promptVersion === job.promptVersion && r.jobs === 1);
+    expect(row).toBeTruthy();
+    expect(row!.produced).toBe(4);
+    expect(row!.approved).toBe(2);
+    expect(row!.rejected).toBe(1);
+    expect(row!.pending).toBe(1);
+    expect(row!.acceptanceRate).toBeCloseTo(2 / 3, 5);
+    expect(row!.duplicateRate).toBe(0);
+
+  });
+
+  it("does not count deferred candidates against acceptance", async () => {
+    const uid = `stats_defer_${Date.now()}`;
+    const job = await createGenerationJob({ topic: uid, brief: "x", requestedCount: 1, model: "stub", subtopics: null, avoidTopics: null, difficulty: "easy", targetCategoryId: null, targetSetId: null }, ACTOR);
+    await db().insert(schema.aiCandidates).values({ id: `${job.id}_d0`, jobId: job.id, stem: `Deferred ${uid}?`, optionsJson: '[{"key":"A","body":"x"}]', correctOptionKey: "A", explanation: "e", backstory: "b", topic: uid, validationStatus: "valid", dedupeStatus: "clean", createdAt: Date.now() }).run();
+    const cands = await db().select({ id: schema.aiCandidates.id }).from(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, job.id)).all();
+    await reviewCandidate(cands[0]!.id, "deferred", ACTOR);
+
+    const stats = await promptVersionStats();
+    const row = stats.find((r) => r.jobs === 1 && r.produced === 1);
+    expect(row).toBeTruthy();
+    expect(row!.acceptanceRate).toBeNull(); // nothing decided yet
+    expect(row!.deferred).toBe(1);
+  });
+});
+

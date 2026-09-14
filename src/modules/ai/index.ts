@@ -17,6 +17,8 @@ export {
   bulkReviewCandidates,
   promoteCandidate,
   pendingReviewCount,
+  promptVersionStats,
+  type PromptVersionStats,
   type JobProgress,
   type CreateJobInput,
   type GenerationDeps,
@@ -31,6 +33,14 @@ export { configuredProvider, openRouterKeyConfigured, r2RawStorage } from "./ada
 export { parseGenerationResponse, GenerationParseError, type ParseResult, type ParseRepair } from "./parse";
 
 export { buildSystemPrompt, buildUserPrompt, PROMPT_VERSION, type GenerationPromptInput } from "./prompts/generate";
+
+export {
+  buildCoverageDigest,
+  extractConceptKey,
+  estimateTokens,
+  type CoverageDigest,
+  type CoverageInput,
+} from "./coverage";
 
 export {
   GeneratedQuestionSchema,

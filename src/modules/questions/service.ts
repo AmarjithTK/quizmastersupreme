@@ -123,17 +123,26 @@ export type QuestionFilters = {
  *
  * Every term is double-quoted so user input can never be parsed as FTS syntax
  * (which would otherwise let a stray `*` or `"` produce a syntax error or an
- * unintended prefix query). Terms are OR-ed: a question bank search should
- * broaden recall, and bm25 ordering sorts the good hits to the top.
+ * unintended prefix query).
+ *
+ * The default joins terms with OR: a question bank SEARCH should broaden
+ * recall, and bm25 ordering sorts the good hits to the top. Callers that need
+ * precision instead — picking a topic's own prior questions — pass
+ * `operator: "AND"`, where a single shared word ("systems") no longer drags in
+ * an unrelated subject ("the Solar System"). See `modules/ai/coverage.ts`.
  */
-export function buildFtsMatch(raw: string): string {
+export function buildFtsMatch(
+  raw: string,
+  options: { operator?: "OR" | "AND" } = {},
+): string {
   const terms = raw
     .split(/\s+/)
     .map((term) => term.replace(/[^\p{L}\p{N}]/gu, ""))
     .filter((term) => term.length > 1);
 
   if (terms.length === 0) return "";
-  return terms.map((term) => `"${term}"`).join(" OR ");
+  const operator = options.operator ?? "OR";
+  return terms.map((term) => `"${term}"`).join(` ${operator} `);
 }
 
 export async function listQuestionsForAdmin(

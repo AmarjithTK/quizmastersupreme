@@ -45,6 +45,7 @@ import {
 } from "./parse";
 import { buildSystemPrompt, buildUserPrompt, PROMPT_VERSION } from "./prompts/generate";
 import { estimateCostUsd, LlmError, type LlmProvider } from "./provider";
+import { buildCoverageDigest } from "./coverage";
 
 const MAX_BOUND_PARAMS = 90;
 const MAX_REQUESTED = 50;
@@ -103,6 +104,14 @@ export async function createGenerationJob(
   }
   if (!input.model.trim()) throw validationError("A model is required.");
 
+  // Compress what the bank already covers for this topic. An LLM call is
+  // stateless, so without this it re-asks the same facts every time (§12.4).
+  const digest = await buildCoverageDigest({
+    topic,
+    subtopics: input.subtopics ?? null,
+    includeExamples: input.includeExamples ?? false,
+  });
+
   const now = nowMs();
   const row: AiGenerationJob = {
     id: newId(),
@@ -119,8 +128,8 @@ export async function createGenerationJob(
     model: input.model.trim(),
     temperature: input.temperature ?? null,
     promptVersion: PROMPT_VERSION,
-    coverageDigest: null,
-    coverageTokens: null,
+    coverageDigest: digest.text || null,
+    coverageTokens: digest.estimatedTokens,
     includeExamples: input.includeExamples ? 1 : 0,
     status: "queued",
     producedCount: 0,
@@ -143,6 +152,9 @@ export async function createGenerationJob(
     topic: row.topic,
     requestedCount: row.requestedCount,
     model: row.model,
+    coverageQuestions: digest.questionCount,
+    coverageConcepts: digest.conceptCount,
+    coverageTokens: digest.estimatedTokens,
   });
 
   return row;
@@ -618,4 +630,93 @@ export async function pendingReviewCount(): Promise<number> {
       .where(eq(aiCandidates.reviewStatus, "pending"))
   )[0];
   return Number(row?.n ?? 0);
+}
+
+// ── acceptance-rate reporting (M13) ──────────────────────────────────────────
+
+/**
+ * How well is a given PROMPT doing?
+ *
+ * `prompt_version` is stamped on every job, so the only honest way to judge a
+ * prompt change is to compare the human decisions made on the candidates it
+ * produced. Without this, "the new prompt feels better" is the entire argument
+ * for a change that costs real money.
+ *
+ * Two deliberate definitions:
+ *
+ *   acceptanceRate = approved / (approved + rejected + merged)
+ *     ONLY decided candidates count. Deferred and pending are excluded rather
+ *     than counted as rejections — a reviewer who has not looked yet is not
+ *     evidence against the prompt, and folding them in would make the number
+ *     sink whenever the queue is long.
+ *
+ *   duplicateRate = duplicates / produced
+ *     Duplicates are the specific failure that coverage-aware generation is
+ *     supposed to reduce, so it is reported next to acceptance rather than
+ *     buried in it.
+ *
+ * A candidate can be BOTH a duplicate and ultimately approved (a reviewer may
+ * accept a near-duplicate deliberately), so the two rates do not sum to 1.
+ */
+export type PromptVersionStats = {
+  promptVersion: string;
+  jobs: number;
+  produced: number;
+  valid: number;
+  duplicates: number;
+  approved: number;
+  rejected: number;
+  merged: number;
+  deferred: number;
+  pending: number;
+  /** approved / decided, or null when nothing has been decided yet. */
+  acceptanceRate: number | null;
+  duplicateRate: number;
+};
+
+const DUPLICATE_STATUSES = "('exact_dup','near_dup','semantic_dup')";
+
+export async function promptVersionStats(): Promise<PromptVersionStats[]> {
+  const rows = await db()
+    .select({
+      promptVersion: aiGenerationJobs.promptVersion,
+      jobs: sql<number>`count(distinct ${aiGenerationJobs.id})`,
+      produced: sql<number>`count(${aiCandidates.id})`,
+      valid: sql<number>`coalesce(sum(case when ${aiCandidates.validationStatus} = 'valid' then 1 else 0 end), 0)`,
+      duplicates: sql<number>`coalesce(sum(case when ${aiCandidates.dedupeStatus} in ${sql.raw(DUPLICATE_STATUSES)} then 1 else 0 end), 0)`,
+      approved: sql<number>`coalesce(sum(case when ${aiCandidates.reviewStatus} = 'approved' then 1 else 0 end), 0)`,
+      rejected: sql<number>`coalesce(sum(case when ${aiCandidates.reviewStatus} = 'rejected' then 1 else 0 end), 0)`,
+      merged: sql<number>`coalesce(sum(case when ${aiCandidates.reviewStatus} = 'merged' then 1 else 0 end), 0)`,
+      deferred: sql<number>`coalesce(sum(case when ${aiCandidates.reviewStatus} = 'deferred' then 1 else 0 end), 0)`,
+      pending: sql<number>`coalesce(sum(case when ${aiCandidates.reviewStatus} = 'pending' then 1 else 0 end), 0)`,
+    })
+    .from(aiGenerationJobs)
+    // LEFT JOIN: a job that produced nothing is still a data point about the
+    // prompt — dropping it would make a broken prompt look like a small one.
+    .leftJoin(aiCandidates, eq(aiCandidates.jobId, aiGenerationJobs.id))
+    .groupBy(aiGenerationJobs.promptVersion)
+    .orderBy(desc(sql`count(${aiCandidates.id})`));
+
+  return rows.map((row) => {
+    const produced = Number(row.produced);
+    const approved = Number(row.approved);
+    const rejected = Number(row.rejected);
+    const merged = Number(row.merged);
+    const decided = approved + rejected + merged;
+
+    return {
+      promptVersion: row.promptVersion,
+      jobs: Number(row.jobs),
+      produced,
+      valid: Number(row.valid),
+      duplicates: Number(row.duplicates),
+      approved,
+      rejected,
+      merged,
+      deferred: Number(row.deferred),
+      pending: Number(row.pending),
+      acceptanceRate: decided === 0 ? null : approved / decided,
+      duplicateRate: produced === 0 ? 0 : Number(row.duplicates) / produced,
+    };
+  });
 }
