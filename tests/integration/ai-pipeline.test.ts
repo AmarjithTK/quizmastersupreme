@@ -27,7 +27,6 @@ import {
   listCandidates,
   listJobCandidates,
   outputBudgetFor,
-  promptVersionStats,
   runGenerationStep,
   setCandidateRejected,
   stubProvider,
@@ -546,22 +545,5 @@ describe("createGenerationJob validation", () => {
   it("rejects a non-positive or oversized count", async () => {
     await expect(newJob(0)).rejects.toMatchObject({ code: "VALIDATION" });
     await expect(newJob(51)).rejects.toMatchObject({ code: "VALIDATION" });
-  });
-});
-
-// ── prompt stats ─────────────────────────────────────────────────────────────
-
-describe("promptVersionStats", () => {
-  it("summarises asked / delivered / duplicates per prompt version", async () => {
-    const job = await newJob(2);
-    await runGenerationStep(job.id, deps(envelope(question("Prompt stats question?"))));
-
-    const stats = await promptVersionStats();
-    expect(stats.length).toBeGreaterThan(0);
-    const row = stats[0]!;
-    expect(row.requested).toBeGreaterThan(0);
-    expect(row.produced).toBeGreaterThan(0);
-    expect(row.freshRate).toBeGreaterThan(0);
-    expect(row.freshRate).toBeLessThanOrEqual(1);
   });
 });

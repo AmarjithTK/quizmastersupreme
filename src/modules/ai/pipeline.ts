@@ -26,7 +26,7 @@
  * write path) as `active` questions.
  */
 
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { db } from "@/db/client";
 import {
   aiCandidates,
@@ -640,46 +640,6 @@ export async function setCandidateRejected(
     .where(eq(aiCandidates.id, id));
   await recordAudit(actorId, rejected ? "ai.candidate_reject" : "ai.candidate_keep", "ai_candidate", id);
   return { ...candidate, rejected: rejected ? 1 : 0 };
-}
-
-// ── generation health, by prompt version ─────────────────────────────────────
-
-export type PromptVersionStats = {
-  promptVersion: string;
-  jobs: number;
-  requested: number;
-  produced: number;
-  duplicates: number;
-  /** produced ÷ (produced + duplicates): how much of the output was usable. */
-  freshRate: number;
-};
-
-export async function promptVersionStats(): Promise<PromptVersionStats[]> {
-  const rows = await db()
-    .select({
-      promptVersion: aiGenerationJobs.promptVersion,
-      jobs: sql<number>`count(*)`,
-      requested: sql<number>`coalesce(sum(${aiGenerationJobs.requestedCount}), 0)`,
-      produced: sql<number>`coalesce(sum(${aiGenerationJobs.producedCount}), 0)`,
-      duplicates: sql<number>`coalesce(sum(${aiGenerationJobs.duplicateCount}), 0)`,
-    })
-    .from(aiGenerationJobs)
-    .groupBy(aiGenerationJobs.promptVersion)
-    .orderBy(desc(sql`coalesce(sum(${aiGenerationJobs.producedCount}), 0)`));
-
-  return rows.map((row) => {
-    const produced = Number(row.produced);
-    const duplicates = Number(row.duplicates);
-    const total = produced + duplicates;
-    return {
-      promptVersion: row.promptVersion,
-      jobs: Number(row.jobs),
-      requested: Number(row.requested),
-      produced,
-      duplicates,
-      freshRate: total === 0 ? 1 : produced / total,
-    };
-  });
 }
 
 // ── commit: the kept set becomes real, playable questions ────────────────────

@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { getCurrentPageUser } from "@/lib/server/get-current-user";
 import { bindings } from "@/lib/cloudflare/bindings";
 import { listCategoriesForAdmin } from "@/modules/catalog";
-import { listJobs, openRouterKeyConfigured, promptVersionStats, type PromptVersionStats } from "@/modules/ai";
+import { listJobs, openRouterKeyConfigured } from "@/modules/ai";
 import { getAiGenerationSettings } from "@/modules/settings";
 import { listSetsForAdmin } from "@/modules/catalog";
 import { GenerationPanel } from "@/components/admin/GenerationPanel";
@@ -25,10 +25,9 @@ export default async function AdminGeneratePage() {
   if (!user) redirect("/login");
   if (user.role !== "admin") return <ForbiddenCard />;
 
-  const [jobs, categories, stats, aiSettings, sets] = await Promise.all([
+  const [jobs, categories, aiSettings, sets] = await Promise.all([
     listJobs(30),
     listCategoriesForAdmin(),
-    promptVersionStats(),
     getAiGenerationSettings(),
     listSetsForAdmin(),
   ]);
@@ -51,8 +50,6 @@ export default async function AdminGeneratePage() {
           </Link>
         </div>
       </header>
-
-      <PromptStats stats={stats} />
 
       <GenerationPanel
         sets={sets.map((set) => ({
@@ -82,56 +79,5 @@ export default async function AdminGeneratePage() {
         categories={categories.map((c) => ({ id: c.id, title: c.title }))}
       />
     </div>
-  );
-}
-
-/**
- * How is each prompt version doing? Questions asked vs delivered, and how much
- * of the model's output was usable (not a duplicate of something already in the
- * bank). This is the signal for whether a prompt change is an improvement.
- */
-function PromptStats({ stats }: { stats: PromptVersionStats[] }) {
-  if (stats.length === 0) {
-    return (
-      <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500">
-        No generation results yet — prompt statistics appear here once jobs have run.
-      </div>
-    );
-  }
-  const pct = (n: number) => `${Math.round(n * 100)}%`;
-  return (
-    <section className="rounded-xl border border-slate-200 bg-white p-4">
-      <h2 className="text-sm font-semibold text-slate-700">Prompt performance</h2>
-      <p className="mt-1 text-xs text-slate-400">
-        Fresh rate = delivered ÷ (delivered + duplicates filtered). A low rate means the model is
-        re-asking facts the bank already covers.
-      </p>
-      <div className="mt-3 overflow-x-auto">
-        <table className="w-full text-left text-xs text-slate-600">
-          <thead className="border-b border-slate-200 text-slate-400">
-            <tr>
-              <th className="py-2 pr-3 font-medium">Prompt</th>
-              <th className="py-2 pr-3 font-medium">Jobs</th>
-              <th className="py-2 pr-3 font-medium">Asked</th>
-              <th className="py-2 pr-3 font-medium">Delivered</th>
-              <th className="py-2 pr-3 font-medium">Duplicates</th>
-              <th className="py-2 pr-3 font-medium">Fresh rate</th>
-            </tr>
-          </thead>
-          <tbody>
-            {stats.map((row) => (
-              <tr key={row.promptVersion} className="border-b border-slate-100">
-                <td className="py-2 pr-3 font-mono text-[11px] text-slate-700">{row.promptVersion}</td>
-                <td className="py-2 pr-3">{row.jobs}</td>
-                <td className="py-2 pr-3">{row.requested}</td>
-                <td className="py-2 pr-3 text-emerald-600">{row.produced}</td>
-                <td className="py-2 pr-3 text-amber-600">{row.duplicates}</td>
-                <td className="py-2 pr-3 font-semibold text-slate-800">{pct(row.freshRate)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
   );
 }
