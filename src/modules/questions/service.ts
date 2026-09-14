@@ -21,11 +21,13 @@ import {
   questionOptions,
   questions,
   questionSetQuestions,
+  quizAttemptAnswers,
+  userQuestionSeen,
   type OptionKey,
   type Question,
   type QuestionStatus,
 } from "@/db/schema";
-import { ApiError, notFound, validationError } from "@/lib/errors";
+import { ApiError, conflict, notFound, validationError } from "@/lib/errors";
 import { recordAudit } from "@/modules/audit";
 import { checkCandidate } from "@/modules/dedupe";
 import { normalizeStem } from "./normalize";
@@ -460,6 +462,106 @@ export async function setQuestionStatus(
 /** Archived, not deleted — attempts reference answers via question_id. */
 export async function archiveQuestion(id: string, actorId: string): Promise<Question> {
   return setQuestionStatus(id, "archived", actorId);
+}
+
+export type DeletedQuestion = {
+  id: string;
+  stem: string;
+  /** How many Q Sets the question was detached from by the delete. */
+  removedFromSets: number;
+};
+
+/**
+ * Permanently delete a question.
+ *
+ * WHY THIS IS GUARDED: `quiz_attempt_answers.question_id` and
+ * `user_question_seen.question_id` both reference `questions` with ON DELETE
+ * CASCADE. Hard-deleting a question a learner has already answered would
+ * silently erase those answer rows and corrupt past results, streaks and
+ * weak-topic stats. Such questions must be ARCHIVED instead, and the refusal
+ * says so with the real count.
+ *
+ * Everything else (options, Q Set membership, "seen" bookkeeping) cascades, and
+ * the FTS delete trigger removes it from search.
+ */
+export async function deleteQuestion(id: string, actorId: string): Promise<DeletedQuestion> {
+  const existing = (await db().select().from(questions).where(eq(questions.id, id)).limit(1))[0];
+  if (!existing) throw notFound("Question not found.");
+
+  const answers = Number(
+    (
+      await db()
+        .select({ n: sql<number>`count(*)` })
+        .from(quizAttemptAnswers)
+        .where(eq(quizAttemptAnswers.questionId, id))
+    )[0]?.n ?? 0,
+  );
+  if (answers > 0) {
+    throw conflict(
+      `This question has been answered in ${answers} attempt${answers === 1 ? "" : "s"}, so deleting it would erase that history. Archive it instead.`,
+    );
+  }
+
+  const [setRows, seenRows] = await Promise.all([
+    db()
+      .select({ n: sql<number>`count(*)` })
+      .from(questionSetQuestions)
+      .where(eq(questionSetQuestions.questionId, id)),
+    db()
+      .select({ n: sql<number>`count(*)` })
+      .from(userQuestionSeen)
+      .where(eq(userQuestionSeen.questionId, id)),
+  ]);
+  const removedFromSets = Number(setRows[0]?.n ?? 0);
+
+  await db().delete(questions).where(eq(questions.id, id));
+
+  await recordAudit(
+    actorId,
+    "question.delete",
+    "question",
+    id,
+    {
+      stem: existing.stem,
+      status: existing.status,
+      origin: existing.origin,
+      removedFromSets,
+      seenBy: Number(seenRows[0]?.n ?? 0),
+    },
+    null,
+  );
+
+  return { id, stem: existing.stem, removedFromSets };
+}
+
+/**
+ * Delete many questions, skipping (and reporting) the ones that must not go.
+ *
+ * One blocked question must never stop the rest of a bulk action, so failures
+ * are collected rather than thrown.
+ */
+export async function bulkDeleteQuestions(
+  ids: string[],
+  actorId: string,
+): Promise<{ deleted: number; deletedIds: string[]; blocked: Array<{ id: string; reason: string }> }> {
+  const unique = [...new Set(ids)].filter(Boolean);
+  const deletedIds: string[] = [];
+  const blocked: Array<{ id: string; reason: string }> = [];
+
+  for (const id of unique) {
+    try {
+      await deleteQuestion(id, actorId);
+      deletedIds.push(id);
+    } catch (error) {
+      blocked.push({
+        id,
+        reason:
+          error instanceof ApiError ? error.message : "This question could not be deleted.",
+      });
+    }
+  }
+
+  return { deleted: deletedIds.length, deletedIds, blocked };
 }
 
 /**

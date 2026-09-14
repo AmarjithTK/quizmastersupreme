@@ -11,6 +11,8 @@ export {
   setQuestionStatus,
   bulkSetQuestionStatus,
   archiveQuestion,
+  deleteQuestion,
+  bulkDeleteQuestions,
   getQuestionForAdmin,
   listQuestionsForAdmin,
   buildFtsMatch,

@@ -9,7 +9,7 @@
  * /api/admin/questions.
  */
 
-import { Archive, CheckCircle2, Download, FileText, Pencil, Plus, Search, Upload, X } from "lucide-react";
+import { Archive, CheckCircle2, Download, FileText, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
 import { useState, useTransition } from "react";
 import { QuestionImport } from "@/components/admin/QuestionImport";
 import {
@@ -58,6 +58,13 @@ export function QuestionBank({ initial }: { initial: { rows: QuestionRow[]; tota
   // M9: bulk selection + CSV import panel.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [importing, setImporting] = useState(false);
+
+  /**
+   * Delete is permanent, so it is a TWO-STEP action: the first click asks,
+   * the second confirms. Nothing is deleted on a single stray click.
+   */
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
 
   const [busy, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
@@ -193,6 +200,51 @@ export function QuestionBank({ initial }: { initial: { rows: QuestionRow[]; tota
           (result.failed.length > 0 ? ` ${result.failed.length} could not be updated.` : ""),
       );
       setSelected(new Set());
+      await load();
+    });
+
+  /** Permanently delete one question. Refused (with a reason) if it was answered. */
+  const deleteOne = (row: QuestionRow) =>
+    run(async () => {
+      const result = await api<{ deleted: { stem: string; removedFromSets: number } }>(
+        `/api/admin/questions/${row.id}`,
+        { method: "DELETE" },
+      );
+      setConfirmDeleteId(null);
+      setNotice(
+        `Deleted “${result.deleted.stem.slice(0, 60)}${result.deleted.stem.length > 60 ? "…" : ""}”` +
+          (result.deleted.removedFromSets > 0
+            ? ` and removed it from ${result.deleted.removedFromSets} Q Set${
+                result.deleted.removedFromSets === 1 ? "" : "s"
+              }.`
+            : "."),
+      );
+      await load();
+    });
+
+  /** Permanently delete everything ticked; answered questions are reported back. */
+  const bulkDelete = () =>
+    run(async () => {
+      const ids = [...selected];
+      if (ids.length === 0) return;
+      const result = await api<{
+        deleted: number;
+        blocked: Array<{ id: string; reason: string }>;
+      }>("/api/admin/questions/bulk-delete", {
+        method: "POST",
+        body: JSON.stringify({ ids }),
+      });
+
+      setConfirmBulkDelete(false);
+      setSelected(new Set());
+      setNotice(
+        `Deleted ${result.deleted} question${result.deleted === 1 ? "" : "s"}.` +
+          (result.blocked.length > 0
+            ? ` ${result.blocked.length} kept: ${result.blocked[0]!.reason}`
+            : ""),
+      );
+      // The blocked ones stay selected so the admin can see what survived.
+      if (result.blocked.length > 0) setSelected(new Set(result.blocked.map((b) => b.id)));
       await load();
     });
 
@@ -360,6 +412,36 @@ export function QuestionBank({ initial }: { initial: { rows: QuestionRow[]; tota
             >
               Archive
             </button>
+            {confirmBulkDelete ? (
+              <span className="flex items-center gap-2 rounded-lg bg-red-600 px-2.5 py-1.5 text-xs font-semibold">
+                Delete {selected.size} permanently?
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void bulkDelete()}
+                  className="rounded bg-white px-2 py-0.5 text-red-700 hover:bg-red-50 disabled:opacity-50"
+                >
+                  Yes, delete
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmBulkDelete(false)}
+                  className="rounded px-1.5 py-0.5 text-white/80 hover:text-white"
+                >
+                  Cancel
+                </button>
+              </span>
+            ) : (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setConfirmBulkDelete(true)}
+                className="inline-flex items-center gap-1 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-500 disabled:opacity-50"
+              >
+                <Trash2 className="size-3.5" />
+                Delete
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setSelected(new Set())}
@@ -475,13 +557,44 @@ export function QuestionBank({ initial }: { initial: { rows: QuestionRow[]; tota
                 <button
                   type="button"
                   aria-label="Archive"
-                  title="Archive"
+                  title="Archive — hides it but keeps the row and any learner history"
                   disabled={busy}
                   onClick={() => setQuestionStatus(row, "archived")}
-                  className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+                  className="rounded-lg p-2 text-slate-400 hover:bg-amber-50 hover:text-amber-700 disabled:opacity-50"
                 >
                   <Archive className="size-4" />
                 </button>
+                {confirmDeleteId === row.id ? (
+                  <span className="flex items-center gap-1 rounded-lg bg-red-50 px-2 py-1 text-[11px] font-semibold text-red-700">
+                    Delete?
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void deleteOne(row)}
+                      className="rounded bg-red-600 px-1.5 py-0.5 text-white hover:bg-red-500 disabled:opacity-50"
+                    >
+                      Yes
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteId(null)}
+                      className="rounded px-1 py-0.5 text-red-700/70 hover:text-red-700"
+                    >
+                      No
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    aria-label="Delete permanently"
+                    title="Delete permanently (refused if learners have answered it — archive instead)"
+                    disabled={busy}
+                    onClick={() => setConfirmDeleteId(row.id)}
+                    className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+                  >
+                    <Trash2 className="size-4" />
+                  </button>
+                )}
               </div>
             </li>
           ),

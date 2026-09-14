@@ -178,7 +178,14 @@ Non-obvious, and each one has already cost time once:
    (`node_modules/.vinext`-adjacent `.vinext/dev/lock.json`), delete the lock file
    before starting a new one.
 9. **The rate limiter resets on every Worker restart** — per-instance memory by design.
-10. **Never call `toLocaleString()` on a date inside a client component.** The server
+10. **Deleting a question is guarded by learner history.** `quiz_attempt_answers.question_id`
+    and `user_question_seen.question_id` both `ON DELETE CASCADE` from `questions`, so a hard
+    delete of an answered question would erase real attempts and corrupt progress stats.
+    `deleteQuestion()` therefore refuses with a 409 naming the count ("answered in N
+    attempts") and the admin UI offers **Archive** for those. Unanswered questions delete
+    for real: options, Q Set links and "seen" rows cascade, and the FTS delete trigger
+    cleans search. Bulk delete skips (and reports) the refused ones instead of failing.
+11. **Never call `toLocaleString()` on a date inside a client component.** The server
     (Workers = UTC) and the browser (local time) render different strings, so React
     fails hydration. Use `<LocalTime value={ts} />` from `src/components/ui/LocalTime.tsx`
     — it renders a UTC-pinned value until mounted, then switches to the viewer's
