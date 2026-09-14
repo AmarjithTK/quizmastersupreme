@@ -1,4 +1,5 @@
 import { errorResponse, jsonResponse } from "@/lib/errors";
+import { logInfo } from "@/lib/logger";
 import { bindings } from "@/lib/cloudflare/bindings";
 import { requireAdmin } from "@/modules/auth";
 import { createGenerationJob, listJobs, openRouterKeyConfigured } from "@/modules/ai";
@@ -50,6 +51,7 @@ export async function POST(request: Request) {
       actor.id,
     );
 
+    logInfo("route", `job ${job.id} created by admin ${actor.id}`, { topic: job.topic, model: job.model });
     return jsonResponse({ job }, { status: 201 });
   } catch (error) {
     return errorResponse(error);

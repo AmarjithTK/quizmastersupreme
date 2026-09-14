@@ -26,6 +26,7 @@ type Job = {
   validCount: number;
   duplicateCount: number;
   costUsd: number | null;
+  errorCode: string | null;
   errorMessage: string | null;
   createdAt: number;
 };
@@ -297,7 +298,20 @@ export function GenerationPanel({
                   {job.costUsd != null && ` · ~$${job.costUsd.toFixed(4)}`}
                 </span>
                 {job.errorMessage && (
-                  <span className="text-xs text-red-600">{job.errorMessage}</span>
+                  <span className="text-xs text-red-600">
+                    {job.errorCode && (
+                      <span className="mr-1 rounded bg-red-100 px-1 py-0.5 font-mono text-[10px]">
+                        {job.errorCode}
+                      </span>
+                    )}
+                    {job.errorMessage}
+                  </span>
+                )}
+                {job.status === "failed" && (
+                  <span className="text-[11px] text-slate-400">
+                    Details are in the terminal running <code>pnpm dev</code> — lines starting{" "}
+                    <code className="font-mono">[qms]</code>.
+                  </span>
                 )}
                 <span className="ml-auto text-[11px] text-slate-400">
                   {new Date(job.createdAt).toLocaleString("en-IN", {

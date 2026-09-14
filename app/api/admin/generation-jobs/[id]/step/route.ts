@@ -1,4 +1,5 @@
 import { errorResponse, jsonResponse } from "@/lib/errors";
+import { logException, logInfo } from "@/lib/logger";
 import { enforceRateLimit } from "@/modules/rate-limit";
 import { requireAdmin } from "@/modules/auth";
 import { configuredProvider, r2RawStorage, runGenerationStep } from "@/modules/ai";
@@ -26,14 +27,22 @@ export async function POST(request: Request, context: RouteContext) {
     enforceRateLimit(request, "admin");
     const { id } = await context.params;
 
-    const progress = await runGenerationStep(id, {
+    const deps = {
       provider: configuredProvider(),
       storage: r2RawStorage(),
       semantic: resolveSemanticDedupe(),
-    });
+    };
+    logInfo("route", `step ${id}`, { provider: deps.provider.name });
+    const progress = await runGenerationStep(id, deps);
 
+    logInfo("route", `step ${id} → ${progress.status}`, {
+      done: progress.done,
+      producedCount: progress.producedCount,
+      error: progress.error,
+    });
     return jsonResponse({ progress });
   } catch (error) {
+    logException("route", `step failed for ${request.url}`, error);
     return errorResponse(error);
   }
 }

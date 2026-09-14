@@ -1,4 +1,5 @@
 import { errorResponse, jsonResponse } from "@/lib/errors";
+import { logInfo } from "@/lib/logger";
 import { requireAdmin } from "@/modules/auth";
 import { buildCoverageDigest, estimateTokens } from "@/modules/ai";
 
@@ -34,6 +35,7 @@ export async function POST(request: Request) {
       includeExamples: body.includeExamples === true,
     });
 
+    logInfo("route", "preview-digest", { topic, questions: digest.questionCount, concepts: digest.conceptCount, tokens: digest.estimatedTokens });
     return jsonResponse({
       digest,
       // A rough input-token figure so the cost is visible before generating.

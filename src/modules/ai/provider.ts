@@ -33,6 +33,8 @@ export interface LlmProvider {
   generate(request: GenerationRequest): Promise<GenerationResponse>;
 }
 
+import { logError, logInfo, logWarn, logException, maskSecret } from "@/lib/logger";
+
 export class LlmError extends Error {
   readonly code: string;
   readonly status: number | null;
@@ -78,6 +80,14 @@ export function openRouterProvider(options: {
   return {
     name: "openrouter",
     async generate(request) {
+      logInfo("provider", `calling ${request.model}`, {
+        url: OPENROUTER_URL,
+        apiKey: maskSecret(options.apiKey),
+        temperature: request.temperature ?? 0.7,
+        maxTokens: request.maxTokens ?? 8000,
+        promptChars: request.system.length + request.user.length,
+      });
+
       const response = await doFetch(OPENROUTER_URL, {
         method: "POST",
         headers: {
@@ -105,6 +115,10 @@ export function openRouterProvider(options: {
       if (!response.ok) {
         // 429 and 5xx are worth retrying; 4xx generally are not.
         const retryable = response.status === 429 || response.status >= 500;
+        logError("provider", `HTTP ${response.status} from provider`, {
+          retryable,
+          bodySnippet: bodyText.slice(0, 500),
+        });
         throw new LlmError(`The model provider returned ${response.status}.`, {
           code: response.status === 429 ? "RATE_LIMITED" : "PROVIDER_ERROR",
           status: response.status,
@@ -112,10 +126,17 @@ export function openRouterProvider(options: {
         });
       }
 
+      logInfo("provider", `HTTP ${response.status} received`, {
+        bytes: bodyText.length,
+      });
+
       let parsed: unknown;
       try {
         parsed = JSON.parse(bodyText);
       } catch {
+        logError("provider", "non-JSON response body", {
+          snippet: bodyText.slice(0, 500),
+        });
         throw new LlmError("The model provider returned a non-JSON response.", {
           code: "BAD_PROVIDER_RESPONSE",
         });
@@ -129,8 +150,19 @@ export function openRouterProvider(options: {
 
       const text = payload.choices?.[0]?.message?.content;
       if (typeof text !== "string" || text.trim() === "") {
+        logWarn("provider", "empty response content", {
+          keys: Object.keys(parsed as object),
+          choices: (parsed as { choices?: unknown[] })?.choices?.length ?? 0,
+        });
         throw new LlmError("The model returned an empty response.", { code: "EMPTY_RESPONSE" });
       }
+
+      logInfo("provider", "response ok", {
+        model: payload.model ?? request.model,
+        promptTokens: payload.usage?.prompt_tokens ?? null,
+        completionTokens: payload.usage?.completion_tokens ?? null,
+        contentChars: text.length,
+      });
 
       return {
         text,
@@ -157,6 +189,7 @@ export function stubProvider(
     name: "stub",
     async generate(request) {
       const text = await respond(request);
+      logInfo("provider", "stub response", { model: request.model, chars: text.length });
       return {
         text,
         model: request.model,

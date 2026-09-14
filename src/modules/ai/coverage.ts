@@ -19,6 +19,7 @@
 
 import { sql } from "drizzle-orm";
 import { db } from "@/db/client";
+import { logInfo } from "@/lib/logger";
 import { buildFtsMatch, normalizeStem } from "@/modules/questions";
 
 /** Rough token estimate. Good enough for budgeting; not a tokenizer. */
@@ -135,6 +136,7 @@ export async function buildCoverageDigest(input: CoverageInput): Promise<Coverag
     where lower(coalesce(q.topic, '')) = lower(${input.topic})
     limit ${maxQuestions}
   `);
+  logInfo("coverage", `topic tag pass for "${input.topic}"`, { matched: byTopic.length });
 
   const rows: Row[] = [...byTopic];
   const seenIds = new Set(rows.map((row) => row.id));
@@ -161,11 +163,14 @@ export async function buildCoverageDigest(input: CoverageInput): Promise<Coverag
         limit ${maxQuestions}
       `);
 
+      logInfo("coverage", `fts top-up for "${input.topic}"`, { match: String(match), hits: related.length });
       for (const row of related) {
         if (seenIds.has(row.id)) continue;
         seenIds.add(row.id);
         rows.push(row);
       }
+    } else {
+      logInfo("coverage", `no fts terms survived for "${input.topic}"`);
     }
   }
 

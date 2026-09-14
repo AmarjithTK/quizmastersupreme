@@ -3,6 +3,8 @@
  * PLAN.md §10.3.
  */
 
+import { logException, logWarn } from "@/lib/logger";
+
 export type ApiErrorCode =
   | "UNAUTHORIZED"
   | "FORBIDDEN"
@@ -53,13 +55,19 @@ export const rateLimited = (message = "Too many requests. Try again shortly.") =
 
 export function errorResponse(error: unknown): Response {
   if (error instanceof ApiError) {
+    // Log every rejected request — ApiError is a REQUEST problem, but a burst
+    // of them (or one the UI hides) is exactly how a broken flow looks like
+    // "nothing happened". Meta includes real details; never stack the secret.
+    logWarn("api", `${error.code} ${error.status}: ${error.message}`, {
+      details: error.details,
+    });
     return Response.json(
       { error: { code: error.code, message: error.message, details: error.details } },
       { status: error.status, headers: { "cache-control": "no-store" } },
     );
   }
 
-  console.error("Unhandled API error", error);
+  logException("api", "unhandled error", error);
   return Response.json(
     { error: { code: "INTERNAL", message: "Something went wrong" } },
     { status: 500, headers: { "cache-control": "no-store" } },

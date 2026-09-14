@@ -65,6 +65,7 @@ export default async function AdminGeneratePage() {
           validCount: job.validCount,
           duplicateCount: job.duplicateCount,
           costUsd: job.costUsd,
+          errorCode: job.errorCode,
           errorMessage: job.errorMessage,
           createdAt: job.createdAt,
         }))}

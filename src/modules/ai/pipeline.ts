@@ -34,6 +34,7 @@ import {
 } from "@/db/schema";
 import { conflict, notFound, validationError } from "@/lib/errors";
 import { recordAudit } from "@/modules/audit";
+import { logError, logInfo, logWarn, logException } from "@/lib/logger";
 import { checkCandidates, type SemanticDedupe } from "@/modules/dedupe";
 import { simhashHex } from "@/modules/dedupe/simhash";
 import { createQuestion, validateQuestion, type QuestionDraft } from "@/modules/questions";
@@ -148,6 +149,15 @@ export async function createGenerationJob(
   };
 
   await db().insert(aiGenerationJobs).values(row);
+  logInfo("ai", `job ${row.id} created`, {
+    topic: row.topic,
+    model: row.model,
+    requestedCount: row.requestedCount,
+    actorId,
+    coverageQuestions: digest.questionCount,
+    coverageConcepts: digest.conceptCount,
+    coverageTokens: digest.estimatedTokens,
+  });
   await recordAudit(actorId, "ai.job_create", "ai_job", row.id, null, {
     topic: row.topic,
     requestedCount: row.requestedCount,
@@ -210,8 +220,10 @@ export async function runGenerationStep(
   deps: GenerationDeps,
 ): Promise<JobProgress> {
   const job = await getJob(jobId);
+  logInfo("ai", `runGenerationStep ${jobId}`, { status: job.status });
 
   if (["succeeded", "partial", "failed", "cancelled"].includes(job.status)) {
+    logWarn("ai", `step called on terminal job ${jobId}`, { status: job.status });
     return progressOf(job);
   }
 
@@ -225,6 +237,11 @@ export async function runGenerationStep(
 /** Step 1 — the LLM call. The slow one, but it is a single outbound request. */
 async function generateStage(job: AiGenerationJob, deps: GenerationDeps): Promise<JobProgress> {
   const startedAt = nowMs();
+  logInfo("ai", `step 1/2 generate for ${job.id}`, {
+    provider: deps.provider.name,
+    topic: job.topic,
+    coverageTokens: job.coverageTokens,
+  });
   const system = buildSystemPrompt();
   const user = buildUserPrompt({
     topic: job.topic,
@@ -261,11 +278,23 @@ async function generateStage(job: AiGenerationJob, deps: GenerationDeps): Promis
       })
       .where(eq(aiGenerationJobs.id, job.id));
 
+    logInfo("ai", `step 1/2 done for ${job.id}`, {
+      status: "running",
+      rawResponseKey: key,
+      promptTokens: response.promptTokens,
+      completionTokens: response.completionTokens,
+      costUsd: estimateCostUsd(job.model, response.promptTokens, response.completionTokens),
+      durationMs: nowMs() - startedAt,
+      outputBytes: response.text.length,
+    });
+
     return progressOf(await getJob(job.id));
   } catch (error) {
     const message =
       error instanceof LlmError ? error.message : "The model provider call failed.";
     const code = error instanceof LlmError ? error.code : "PROVIDER_ERROR";
+    logException("ai", `step 1/2 FAILED for ${job.id}`, error);
+    logWarn("ai", `job ${job.id} marked failed`, { code, message });
 
     await db()
       .update(aiGenerationJobs)
@@ -279,12 +308,15 @@ async function generateStage(job: AiGenerationJob, deps: GenerationDeps): Promis
 
 /** Step 2 — parse, validate, dedupe, store. Fast and deterministic. */
 async function ingestStage(job: AiGenerationJob, deps: GenerationDeps): Promise<JobProgress> {
+  logInfo("ai", `step 2/2 ingest for ${job.id}`, { rawResponseKey: job.rawResponseKey });
   if (!job.rawResponseKey) {
+    logError("ai", `step 2/2 ${job.id}: no raw response key`);
     await failJob(job.id, "MISSING_RAW", "The job has no stored model response to process.");
     return progressOf(await getJob(job.id), "The job has no stored model response to process.");
   }
 
   const text = await deps.storage.get(job.rawResponseKey);
+  logInfo("ai", `step 2/2 ${job.id}: read raw response`, { bytes: text?.length ?? 0 });
   if (text == null) {
     await failJob(job.id, "MISSING_RAW", "The stored model response could not be read.");
     return progressOf(await getJob(job.id), "The stored model response could not be read.");
@@ -296,9 +328,14 @@ async function ingestStage(job: AiGenerationJob, deps: GenerationDeps): Promise<
   } catch (error) {
     const message =
       error instanceof GenerationParseError ? error.message : "The model response could not be parsed.";
+    logException("ai", `step 2/2 ${job.id}: parse failed`, error);
     await failJob(job.id, "UNPARSEABLE", message);
     return progressOf(await getJob(job.id), message);
   }
+  logInfo("ai", `step 2/2 ${job.id}: parsed`, {
+    accepted: parsed.accepted.length,
+    rejected: parsed.rejected.length,
+  });
 
   // ── Validation, per candidate (one bad item must not sink the batch) ─────
   const valid: ParsedCandidate[] = [];
@@ -399,6 +436,17 @@ async function ingestStage(job: AiGenerationJob, deps: GenerationDeps): Promise<
   const produced = rows.length;
   const status = produced === 0 ? "failed" : invalid.length > 0 ? "partial" : "succeeded";
 
+  logInfo("ai", `step 2/2 done for ${job.id}`, {
+    status,
+    accepted: parsed.accepted.length,
+    valid: valid.length,
+    invalid: invalid.length,
+    duplicates: duplicateCount,
+    storedRows: rows.length,
+    repair: parsed.repair ?? [],
+    durationMs: job.startedAt ? now - job.startedAt : null,
+  });
+
   await db()
     .update(aiGenerationJobs)
     .set({
@@ -426,6 +474,7 @@ async function ingestStage(job: AiGenerationJob, deps: GenerationDeps): Promise<
 }
 
 async function failJob(jobId: string, code: string, message: string): Promise<void> {
+  logError("ai", `job ${jobId} failed`, { code, message });
   await db()
     .update(aiGenerationJobs)
     .set({ status: "failed", errorCode: code, errorMessage: message, finishedAt: nowMs() })
