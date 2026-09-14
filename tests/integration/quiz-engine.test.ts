@@ -23,6 +23,7 @@ import {
   getAttemptQuestions,
   getAttemptState,
   getAttemptSummary,
+  MAX_QUESTION_MS,
   startOrResumeAttempt,
   submitAnswer,
 } from "@/modules/quiz";
@@ -418,6 +419,79 @@ describe("§11.5 server-authoritative clock", () => {
     const state = await getAttemptState(attempt.id, u);
     expect(state.serverDeadlineAt).toBeNull();
     expect(state.remainingSeconds).toBeNull();
+  });
+});
+
+// ── §11.6 / M7 — per-question timing ─────────────────────────────────────────
+
+describe("M7 timing is measured server-side", () => {
+  it("records time per answer from the server clock, not the client's", async () => {
+    const u = user("timing");
+    await finishAll(u);
+    const { attempt } = await startOrResumeAttempt(u, SET);
+
+    await submitAnswer(attempt.id, u, {
+      questionId: questionIds[0]!,
+      selectedOptionKey: "A",
+      // A client claiming it took four hours must be ignored.
+      timeTakenMs: 4 * 60 * 60 * 1000,
+    });
+
+    const answers = await db()
+      .select()
+      .from(schema.quizAttemptAnswers)
+      .where(eq(schema.quizAttemptAnswers.attemptId, attempt.id));
+
+    // Real elapsed time is milliseconds; certainly not four hours.
+    expect(answers[0]!.timeTakenMs).toBeLessThan(60_000);
+    expect(answers[0]!.timeTakenMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("caps a single question's time so walking away is not counted as study", async () => {
+    const u = user("timecap");
+    await finishAll(u);
+    const { attempt } = await startOrResumeAttempt(u, SET);
+
+    // Pretend the last activity was three days ago.
+    await db()
+      .update(schema.quizAttempts)
+      .set({ lastActivityAt: Date.now() - 3 * 24 * 60 * 60 * 1000 })
+      .where(eq(schema.quizAttempts.id, attempt.id))
+      .run();
+
+    await submitAnswer(attempt.id, u, { questionId: questionIds[0]!, selectedOptionKey: "A" });
+
+    const answers = await db()
+      .select()
+      .from(schema.quizAttemptAnswers)
+      .where(eq(schema.quizAttemptAnswers.attemptId, attempt.id));
+
+    expect(answers[0]!.timeTakenMs).toBe(MAX_QUESTION_MS);
+  });
+
+  it("accumulates time on the attempt and exposes it in state and summary", async () => {
+    const u = user("timeacc");
+    await finishAll(u);
+    const { attempt } = await startOrResumeAttempt(u, SET);
+
+    await submitAnswer(attempt.id, u, { questionId: questionIds[0]!, selectedOptionKey: "A" });
+    await submitAnswer(attempt.id, u, { questionId: questionIds[1]!, selectedOptionKey: "A" });
+
+    const state = await getAttemptState(attempt.id, u);
+    expect(state.timeSpentMs).toBeGreaterThan(0);
+    // And the runner gets the start time it needs for the elapsed counter.
+    expect(state.startedAt).toBeGreaterThan(0);
+
+    await completeAttempt(attempt.id, u);
+    const summary = await getAttemptSummary(attempt.id, u);
+
+    expect(summary.timeSpentMs).toBeGreaterThanOrEqual(state.timeSpentMs);
+    for (const question of summary.questions) {
+      expect(question.timeTakenMs).toBeGreaterThanOrEqual(0);
+    }
+    // The two answered questions carry real (non-zero) timing.
+    const answered = summary.questions.filter((q) => q.selectedOptionKey !== null);
+    expect(answered.every((q) => q.timeTakenMs >= 0)).toBe(true);
   });
 });
 

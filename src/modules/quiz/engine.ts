@@ -42,6 +42,12 @@ import { assertTransition } from "./state-machine";
 /** Late answers are accepted for this long, to cover in-flight requests (§11.5). */
 export const SUBMISSION_GRACE_MS = 5_000;
 
+/**
+ * Ceiling on a single question's recorded time. Anything longer is treated as
+ * "they walked away", not as time on task (§11.6).
+ */
+export const MAX_QUESTION_MS = 15 * 60 * 1000;
+
 // ── payload shapes ───────────────────────────────────────────────────────────
 
 /** A question as delivered BEFORE it is answered. Note what is absent. */
@@ -83,6 +89,10 @@ export type AttemptState = {
   skippedCount: number;
   remainingSeconds: number | null;
   serverDeadlineAt: number | null;
+  /** When the paper was started — used for the elapsed counter on untimed sets. */
+  startedAt: number;
+  /** Accumulated time ON TASK (sum of capped per-answer gaps), in ms. */
+  timeSpentMs: number;
   /** Question ids with their outcome. Correctness only for ANSWERED ones. */
   answers: Array<{ questionId: string; index: number; selectedOptionKey: string | null; isCorrect: number | null }>;
 };
@@ -95,6 +105,7 @@ export type AttemptSummary = {
   score: Score;
   startedAt: number;
   completedAt: number | null;
+  timeSpentMs: number;
   questions: Array<{
     index: number;
     questionId: string;
@@ -102,6 +113,8 @@ export type AttemptSummary = {
     options: Array<{ key: OptionKey; body: string; isCorrect: boolean }>;
     selectedOptionKey: string | null;
     isCorrect: number | null;
+    /** Server-measured time on this question. */
+    timeTakenMs: number;
     explanation: string | null;
     backstory: string | null;
     backstoryFormat: string;
@@ -211,6 +224,10 @@ async function finishAttempt(
   const counts = await recount(attempt.id);
   const now = nowMs();
 
+  // Add the time on the LAST question, which was never submitted (they read it
+  // and finished, or the clock ran out). Capped for the same reason as above.
+  const trailingMs = Math.min(Math.max(0, now - attempt.lastActivityAt), MAX_QUESTION_MS);
+
   await db()
     .update(quizAttempts)
     .set({
@@ -219,6 +236,7 @@ async function finishAttempt(
       correctCount: counts.correctCount,
       wrongCount: counts.wrongCount,
       skippedCount: Math.max(0, attempt.totalQuestions - counts.answeredCount),
+      timeSpentMs: attempt.timeSpentMs + trailingMs,
       // An expired attempt ended at its deadline, not when we noticed.
       completedAt: status === "expired" ? attempt.serverDeadlineAt : now,
       lastActivityAt: now,
@@ -392,6 +410,8 @@ export async function getAttemptState(attemptId: string, userId: string): Promis
     skippedCount: Math.max(0, attempt.totalQuestions - attempt.answeredCount),
     remainingSeconds,
     serverDeadlineAt: attempt.serverDeadlineAt,
+    startedAt: attempt.startedAt,
+    timeSpentMs: attempt.timeSpentMs,
     answers,
   };
 }
@@ -517,6 +537,18 @@ export async function submitAnswer(
 
   const isCorrect = input.selectedOptionKey === correctOptionKey ? 1 : 0;
 
+  /**
+   * Per-question timing is measured SERVER-SIDE, as the gap since the last
+   * activity on this attempt. A client-supplied duration is not trusted: it is
+   * trivially inflatable or deflatable, and the number is shown back to the
+   * learner as a study signal.
+   *
+   * The gap is capped at MAX_QUESTION_MS so that closing the tab for a day and
+   * coming back does not get recorded as "spent 8 hours on question 4".
+   */
+  const gap = Math.max(0, now - attempt.lastActivityAt);
+  const serverTimeMs = Math.min(gap, MAX_QUESTION_MS);
+
   await db()
     .insert(quizAttemptAnswers)
     .values({
@@ -525,7 +557,7 @@ export async function submitAnswer(
       questionIndex: index,
       selectedOptionKey: input.selectedOptionKey,
       isCorrect,
-      timeTakenMs: Math.max(0, Math.round(input.timeTakenMs ?? 0)),
+      timeTakenMs: serverTimeMs,
       answeredAt: now,
       clientSeq: input.clientSeq ?? null,
     })
@@ -534,7 +566,7 @@ export async function submitAnswer(
       set: {
         selectedOptionKey: input.selectedOptionKey,
         isCorrect,
-        timeTakenMs: Math.max(0, Math.round(input.timeTakenMs ?? 0)),
+        timeTakenMs: serverTimeMs,
         answeredAt: now,
         clientSeq: input.clientSeq ?? null,
       },
@@ -549,6 +581,9 @@ export async function submitAnswer(
       // Highest index reached, so the record reflects how far they got.
       currentIndex: Math.max(attempt.currentIndex, index + 1),
       skippedCount: Math.max(0, attempt.totalQuestions - counts.answeredCount),
+      // Accumulated time ON TASK (sum of capped per-answer gaps), not wall
+      // clock — a paper left open overnight should not read as 14 hours spent.
+      timeSpentMs: attempt.timeSpentMs + serverTimeMs,
       lastActivityAt: now,
       updatedAt: now,
     })
@@ -690,6 +725,7 @@ export async function getAttemptSummary(
       questionId: quizAttemptAnswers.questionId,
       selectedOptionKey: quizAttemptAnswers.selectedOptionKey,
       isCorrect: quizAttemptAnswers.isCorrect,
+      timeTakenMs: quizAttemptAnswers.timeTakenMs,
     })
     .from(quizAttemptAnswers)
     .where(eq(quizAttemptAnswers.attemptId, attemptId));
@@ -709,6 +745,7 @@ export async function getAttemptSummary(
     score,
     startedAt: attempt.startedAt,
     completedAt: attempt.completedAt,
+    timeSpentMs: attempt.timeSpentMs,
     questions: order.flatMap((questionId, index) => {
       const question = questionById.get(questionId);
       if (!question) return [];
@@ -723,6 +760,7 @@ export async function getAttemptSummary(
             .map((o) => ({ key: o.key as OptionKey, body: o.body, isCorrect: o.isCorrect === 1 })),
           selectedOptionKey: (answer?.selectedOptionKey as OptionKey | null) ?? null,
           isCorrect: answer?.isCorrect ?? null,
+          timeTakenMs: answer?.timeTakenMs ?? 0,
           explanation: question.explanation,
           backstory: question.backstory,
           backstoryFormat: question.backstoryFormat,

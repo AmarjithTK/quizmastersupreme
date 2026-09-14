@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { LogOut, ShieldCheck } from "lucide-react";
+import { LogOut, Search as SearchIcon, ShieldCheck } from "lucide-react";
 import { getCurrentPageUser } from "@/lib/server/get-current-user";
 import { cn } from "@/lib/utils";
 import "./globals.css";
@@ -28,6 +28,21 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
             >
               Quiz Master <span className="text-slate-400">Supreme</span>
             </Link>
+
+            <form
+              action="/search"
+              method="get"
+              className="relative hidden max-w-xs flex-1 sm:block"
+            >
+              <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
+              <input
+                name="q"
+                type="search"
+                placeholder="Search quizzes…"
+                aria-label="Search quizzes"
+                className="w-full rounded-lg border border-slate-200 bg-slate-50 py-1.5 pl-8 pr-3 text-sm focus:border-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-slate-900/10"
+              />
+            </form>
 
             <nav className="flex items-center gap-2">
               {user ? (

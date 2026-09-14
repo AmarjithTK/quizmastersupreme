@@ -14,6 +14,7 @@ export {
   abandonAttempt,
   getAttemptSummary,
   SUBMISSION_GRACE_MS,
+  MAX_QUESTION_MS,
   type AttemptQuestion,
   type AnswerResult,
   type AttemptState,

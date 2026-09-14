@@ -1,7 +1,9 @@
+import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { getCurrentPageUser } from "@/lib/server/get-current-user";
 import { ApiError } from "@/lib/errors";
 import { getAttemptQuestions, getAttemptState, startOrResumeAttempt } from "@/modules/quiz";
+import { getLatestFinishedAttempt } from "@/modules/progress";
 import { QuizRunner } from "@/components/quiz/QuizRunner";
 
 export const dynamic = "force-dynamic";
@@ -24,11 +26,18 @@ export default async function QuizPage({ params }: PageProps) {
   if (!user) redirect(`/login?redirect=${encodeURIComponent(`/quiz/${setId}`)}`);
 
   let attemptId: string;
+  let resumed = false;
+  let previous: Awaited<ReturnType<typeof getLatestFinishedAttempt>> = null;
   try {
-    const { attempt } = await startOrResumeAttempt(user.id, setId);
+    const started = await startOrResumeAttempt(user.id, setId);
     // A finished attempt belongs on the results page, not in the runner.
-    if (attempt.status !== "in_progress") redirect(`/attempts/${attempt.id}`);
-    attemptId = attempt.id;
+    if (started.attempt.status !== "in_progress") redirect(`/attempts/${started.attempt.id}`);
+    attemptId = started.attempt.id;
+    resumed = started.resumed;
+
+    // Starting a FRESH paper when a previous one ended deserves a word: without
+    // this, a timed-out attempt disappears silently and its score is never seen.
+    if (!resumed) previous = await getLatestFinishedAttempt(user.id, setId);
   } catch (error) {
     if (error instanceof ApiError && error.code === "NOT_FOUND") notFound();
     return (
@@ -55,6 +64,25 @@ export default async function QuizPage({ params }: PageProps) {
           </span>
         )}
       </header>
+
+      {previous && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
+          <span>
+            {previous.status === "expired"
+              ? "Your previous attempt on this set ran out of time."
+              : previous.status === "abandoned"
+                ? "You abandoned your previous attempt on this set."
+                : "You completed this set before."}{" "}
+            Last result: <strong className="font-semibold">{previous.percent}%</strong>.
+          </span>
+          <Link
+            href={`/attempts/${previous.attemptId}`}
+            className="font-medium text-slate-900 underline underline-offset-2"
+          >
+            Review it
+          </Link>
+        </div>
+      )}
 
       <QuizRunner attempt={state} initialQuestions={questions} />
     </div>

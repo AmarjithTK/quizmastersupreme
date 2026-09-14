@@ -16,6 +16,7 @@ import { createQuestion } from "@/modules/questions";
 import {
   getDashboardStats,
   getInProgressAttempts,
+  getStreak,
   getUserHistory,
   getWeakTopics,
 } from "@/modules/progress";
@@ -229,6 +230,31 @@ describe("getInProgressAttempts", () => {
 });
 
 // ── weak topics ──────────────────────────────────────────────────────────────
+
+// ── streak ───────────────────────────────────────────────────────────────────
+
+describe("getStreak", () => {
+  it("is zero for someone who has never answered anything", async () => {
+    const streak = await getStreak("user__nobody_at_all");
+    expect(streak).toEqual({ current: 0, longest: 0, activeDays: [] });
+  });
+
+  it("counts today once an answer has been given", async () => {
+    await resetUserProgress();
+    await answerAndComplete(2, 1, 3);
+
+    const streak = await getStreak(ACTOR);
+    expect(streak.current).toBeGreaterThanOrEqual(1);
+    expect(streak.longest).toBeGreaterThanOrEqual(streak.current);
+    expect(streak.activeDays.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("returns days in descending order", async () => {
+    const streak = await getStreak(ACTOR);
+    const sorted = [...streak.activeDays].sort().reverse();
+    expect(streak.activeDays).toEqual(sorted);
+  });
+});
 
 describe("getWeakTopics", () => {
   it("respects the minimum-attempts threshold", async () => {

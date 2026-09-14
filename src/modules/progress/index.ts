@@ -157,9 +157,12 @@ export {
   getDashboardStats,
   getInProgressAttempts,
   getUserHistory,
+  getLatestFinishedAttempt,
+  getStreak,
   getWeakTopics,
   type DashboardStats,
   type AttemptListItem,
+  type Streak,
   type WeakTopic,
 } from "./dashboard";
 

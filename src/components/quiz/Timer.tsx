@@ -16,6 +16,35 @@ import { Clock } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { cn, formatClock } from "@/lib/utils";
 
+export function Elapsed({
+  since,
+  className,
+}: {
+  /** Epoch ms the attempt started. */
+  since: number;
+  className?: string;
+}) {
+  const [mounted, setMounted] = useState(false);
+  const [seconds, setSeconds] = useState(0);
+
+  useEffect(() => {
+    setMounted(true);
+    const tick = () => setSeconds(Math.max(0, Math.floor((Date.now() - since) / 1000)));
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [since]);
+
+  return (
+    <span
+      className={cn("inline-flex items-center gap-1.5 font-mono text-sm tabular-nums text-slate-700", className)}
+    >
+      <Clock className="size-4" />
+      {mounted ? formatClock(seconds) : "--:--"}
+    </span>
+  );
+}
+
 export function Timer({
   deadlineAt,
   onExpire,

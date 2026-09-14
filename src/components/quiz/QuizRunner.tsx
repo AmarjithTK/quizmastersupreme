@@ -14,6 +14,7 @@
 
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowRight,
   CheckCircle2,
   Flag,
@@ -25,7 +26,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { BackstoryRenderer } from "@/components/backstory/BackstoryRenderer";
 import { cn } from "@/lib/utils";
 import { QuestionMap, type QuestionCell } from "./QuestionMap";
-import { Timer } from "./Timer";
+import { Elapsed, Timer } from "./Timer";
 import type { AnswerResult, AttemptQuestion, AttemptState } from "@/modules/quiz";
 
 type OptionKey = "A" | "B" | "C" | "D" | "E";
@@ -213,17 +214,36 @@ export function QuizRunner({
   }
 
   return (
-    <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
+    <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
+      {/* ── mobile status bar ───────────────────────────────────────────── */}
+      <div className="sticky top-14 z-20 -mx-4 flex items-center gap-3 border-b border-slate-200 bg-white/95 px-4 py-2 backdrop-blur lg:hidden">
+        <span className="text-xs font-semibold tabular-nums text-slate-600">
+          {index + 1}/{attempt.totalQuestions}
+        </span>
+        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-100">
+          <div className="h-full rounded-full bg-slate-900" style={{ width: `${progressPct}%` }} />
+        </div>
+        {attempt.serverDeadlineAt != null ? (
+          <Timer deadlineAt={attempt.serverDeadlineAt} onExpire={finish} />
+        ) : (
+          <Elapsed since={attempt.startedAt} />
+        )}
+      </div>
+
       {/* ── question column ─────────────────────────────────────────────── */}
       <div className="flex min-w-0 flex-1 flex-col gap-4">
         <div className="flex items-center justify-between gap-4">
-          <span className="text-sm font-medium text-slate-500">
+          <span className="hidden text-sm font-medium text-slate-500 lg:inline">
             Question {index + 1} of {attempt.totalQuestions}
           </span>
-          <div className="lg:hidden">
-            <Timer deadlineAt={attempt.serverDeadlineAt} onExpire={finish} />
+          <div className="hidden lg:block">
+            {attempt.serverDeadlineAt == null && <Elapsed since={attempt.startedAt} />}
           </div>
         </div>
+
+        {/* Low-time warning — the countdown turns amber under a minute, but a
+            colour change alone is easy to miss mid-question. */}
+        <LowTimeBanner deadlineAt={attempt.serverDeadlineAt} />
 
         {error && (
           <div role="alert" className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
@@ -364,7 +384,11 @@ export function QuizRunner({
         <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4">
           <div className="hidden items-center justify-between lg:flex">
             <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Time</span>
-            <Timer deadlineAt={attempt.serverDeadlineAt} onExpire={finish} />
+            {attempt.serverDeadlineAt != null ? (
+              <Timer deadlineAt={attempt.serverDeadlineAt} onExpire={finish} />
+            ) : (
+              <Elapsed since={attempt.startedAt} />
+            )}
           </div>
 
           <div className="flex flex-col gap-1">
@@ -415,6 +439,42 @@ export function QuizRunner({
           </button>
         </div>
       </aside>
+    </div>
+  );
+}
+
+/**
+ * Warning strip for the final minute.
+ *
+ * The countdown itself turns amber, but a colour change on a small number is
+ * easy to miss while reading a question — and running out mid-question silently
+ * costs the marks for everything still unanswered.
+ */
+function LowTimeBanner({ deadlineAt }: { deadlineAt: number | null }) {
+  const [remaining, setRemaining] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (deadlineAt == null) {
+      setRemaining(null);
+      return;
+    }
+    const tick = () => setRemaining(Math.max(0, Math.floor((deadlineAt - Date.now()) / 1000)));
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [deadlineAt]);
+
+  if (remaining === null || remaining > 60) return null;
+
+  return (
+    <div
+      role="status"
+      className="flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-900"
+    >
+      <AlertTriangle className="size-4 shrink-0" />
+      {remaining > 0
+        ? "Under a minute left — anything unanswered scores zero."
+        : "Time is up. Submitting your paper…"}
     </div>
   );
 }

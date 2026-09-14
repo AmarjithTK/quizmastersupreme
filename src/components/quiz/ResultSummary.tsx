@@ -9,7 +9,7 @@
  */
 
 import Link from "next/link";
-import { CheckCircle2, Circle, MinusCircle, XCircle } from "lucide-react";
+import { CheckCircle2, Clock, MinusCircle, XCircle } from "lucide-react";
 import { BackstoryRenderer } from "@/components/backstory/BackstoryRenderer";
 import { cn } from "@/lib/utils";
 import type { AttemptSummary } from "@/modules/quiz";
@@ -20,6 +20,16 @@ function formatDate(ms: number | null): string {
     dateStyle: "medium",
     timeStyle: "short",
   });
+}
+
+/** Durations on a paper are minutes and seconds, never "2.4 hours". */
+export function formatDurationMs(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
 }
 
 export function ResultSummary({
@@ -59,7 +69,7 @@ export function ResultSummary({
         </p>
       </header>
 
-      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <div className="rounded-2xl border border-slate-200 bg-white p-4">
           <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Score</p>
           <p className={cn("mt-1 text-3xl font-semibold tabular-nums", tone)}>
@@ -79,6 +89,12 @@ export function ResultSummary({
         <Stat label="Correct" value={score.correct} tone="text-emerald-600" icon={<CheckCircle2 className="size-4" />} />
         <Stat label="Wrong" value={score.wrong} tone="text-rose-600" icon={<XCircle className="size-4" />} />
         <Stat label="Unanswered" value={score.skipped} tone="text-slate-500" icon={<MinusCircle className="size-4" />} />
+        <Stat
+          label="Time on task"
+          value={formatDurationMs(summary.timeSpentMs)}
+          tone="text-slate-900"
+          icon={<Clock className="size-4" />}
+        />
       </section>
 
       {score.skipped > 0 && (
@@ -102,6 +118,17 @@ export function ResultSummary({
                 </span>
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium leading-6 text-slate-900">{question.stem}</p>
+                  <p className="mt-1 flex flex-wrap items-center gap-x-3 text-[11px] text-slate-400">
+                    {question.timeTakenMs > 0 && (
+                      <span className="inline-flex items-center gap-1">
+                        <Clock className="size-3" />
+                        {formatDurationMs(question.timeTakenMs)}
+                      </span>
+                    )}
+                    {question.isCorrect === 1 && <span className="text-emerald-600">correct</span>}
+                    {question.isCorrect === 0 && <span className="text-rose-600">incorrect</span>}
+                    {question.isCorrect === null && <span>not answered</span>}
+                  </p>
 
                   <ul className="mt-3 flex flex-col gap-1.5">
                     {question.options.map((option) => {
@@ -140,13 +167,6 @@ export function ResultSummary({
                     })}
                   </ul>
 
-                  {question.selectedOptionKey === null && (
-                    <p className="mt-2 flex items-center gap-1.5 text-xs text-slate-400">
-                      <Circle className="size-3" />
-                      Not answered
-                    </p>
-                  )}
-
                   {(question.explanation || question.backstory) && (
                     <details className="mt-3">
                       <summary className="cursor-pointer text-xs font-medium text-slate-500 hover:text-slate-800">
@@ -182,7 +202,7 @@ function Stat({
   icon,
 }: {
   label: string;
-  value: number;
+  value: number | string;
   tone: string;
   icon: React.ReactNode;
 }) {

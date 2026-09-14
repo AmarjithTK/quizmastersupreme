@@ -5,6 +5,7 @@ import { getCurrentPageUser } from "@/lib/server/get-current-user";
 import {
   getDashboardStats,
   getInProgressAttempts,
+  getStreak,
   getUserHistory,
   getWeakTopics,
 } from "@/modules/progress";
@@ -24,11 +25,12 @@ export default async function AccountPage() {
   const user = await getCurrentPageUser();
   if (!user) redirect("/login?redirect=/account");
 
-  const [stats, inProgress, history, weakTopics] = await Promise.all([
+  const [stats, inProgress, history, weakTopics, streak] = await Promise.all([
     getDashboardStats(user.id),
     getInProgressAttempts(user.id),
     getUserHistory(user.id, { pageSize: 5 }),
     getWeakTopics(user.id),
+    getStreak(user.id),
   ]);
 
   return (
@@ -51,7 +53,7 @@ export default async function AccountPage() {
         </Link>
       </header>
 
-      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <Tile
           icon={<BarChart3 className="size-4" />}
           label="Questions answered"
@@ -81,6 +83,15 @@ export default async function AccountPage() {
         />
         <Tile
           icon={<Flame className="size-4" />}
+          label="Day streak"
+          value={formatNumber(streak.current)}
+          hint={
+            streak.longest > 0 ? `Best: ${streak.longest} ${streak.longest === 1 ? "day" : "days"}` : undefined
+          }
+          tone={streak.current > 0 ? "text-orange-600" : undefined}
+        />
+        <Tile
+          icon={<Clock className="size-4" />}
           label="In progress"
           value={formatNumber(inProgress.length)}
           hint={inProgress.length > 0 ? "Pick up where you left off" : "Nothing unfinished"}
