@@ -1,6 +1,7 @@
 import { errorResponse, jsonResponse } from "@/lib/errors";
 import { requireAdmin } from "@/modules/auth";
 import { importQuestions } from "@/modules/questions";
+import { resolveSemanticDedupe } from "@/modules/dedupe";
 import type { QuestionStatus } from "@/db/schema";
 
 /**
@@ -70,7 +71,11 @@ export async function POST(request: Request) {
       );
     }
 
-    const report = await importQuestions(csv, actor.id, { status, dryRun });
+    const report = await importQuestions(csv, actor.id, {
+      status,
+      dryRun,
+      semantic: resolveSemanticDedupe(),
+    });
     return jsonResponse({ report }, { status: 200 });
   } catch (error) {
     return errorResponse(error);

@@ -23,6 +23,7 @@ import {
   type QuestionStatus,
 } from "@/db/schema";
 import { recordAudit } from "@/modules/audit";
+import { checkCandidates, type SemanticDedupe } from "@/modules/dedupe";
 import { simhashHex } from "@/modules/dedupe/simhash";
 import { parseCsv, rowsToObjects } from "./csv";
 import { computeDedupeHashes } from "./normalize";
@@ -118,7 +119,7 @@ async function chunked<T>(
 export async function importQuestions(
   csvText: string,
   actorId: string,
-  options: { status?: QuestionStatus; dryRun?: boolean } = {},
+  options: { status?: QuestionStatus; dryRun?: boolean; semantic?: SemanticDedupe | null } = {},
 ): Promise<ImportReport> {
   const status = options.status ?? "draft";
   const dryRun = options.dryRun ?? false;
@@ -184,25 +185,28 @@ export async function importQuestions(
     uniqueCandidates.push(candidate);
   }
 
-  // ── 4. Duplicates against the EXISTING bank, chunked ─────────────────────
-  const allHashes = uniqueCandidates.map((c) => c.hashes!.normalizedHash);
-  const existingByHash = new Map<string, { id: string; stem: string }>();
-
-  await chunked(allHashes, MAX_BOUND_PARAMS, async (chunk) => {
-    const rows = await db()
-      .select({ id: questions.id, stem: questions.stem, normalizedHash: questions.normalizedHash })
-      .from(questions)
-      .where(inArray(questions.normalizedHash, chunk));
-    for (const row of rows) existingByHash.set(row.normalizedHash, { id: row.id, stem: row.stem });
-  });
+  // ── 4. Duplicates against the EXISTING bank, via the shared funnel ───────
+  // Layers 1-3 in one batched pass, so a CSV import gets exactly the same
+  // duplicate treatment as a hand-typed question (§2.9).
+  const verdicts = await checkCandidates(
+    uniqueCandidates.map((candidate) => ({
+      stem: candidate.draft.stem,
+      optionBodies: candidate.draft.options.map((o) => o.body),
+    })),
+    { semantic: options.semantic },
+  );
 
   const toInsert: Candidate[] = [];
-  for (const candidate of uniqueCandidates) {
-    const match = existingByHash.get(candidate.hashes!.normalizedHash);
-    if (match) {
+  for (const [index, candidate] of uniqueCandidates.entries()) {
+    const verdict = verdicts[index]!;
+    if (verdict.autoReject || verdict.status !== "clean") {
       candidate.result.status = "duplicate";
-      candidate.result.matchedStem = match.stem;
-      candidate.result.reasons = [`Already in the bank as ${match.id}.`];
+      candidate.result.matchedStem = verdict.bestMatch?.stem || undefined;
+      candidate.result.reasons = [
+        verdict.autoReject
+          ? `Already in the bank as ${verdict.bestMatch?.questionId ?? "an existing question"}.`
+          : `Looks like an existing question (${Math.round((verdict.bestMatch?.similarity ?? 0) * 100)}% similar).`,
+      ];
       results.push(candidate.result);
       continue;
     }

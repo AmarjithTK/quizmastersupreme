@@ -34,7 +34,7 @@ import {
 } from "@/db/schema";
 import { conflict, notFound, validationError } from "@/lib/errors";
 import { recordAudit } from "@/modules/audit";
-import { checkCandidates } from "@/modules/dedupe";
+import { checkCandidates, type SemanticDedupe } from "@/modules/dedupe";
 import { simhashHex } from "@/modules/dedupe/simhash";
 import { createQuestion, validateQuestion, type QuestionDraft } from "@/modules/questions";
 import {
@@ -57,6 +57,8 @@ export type RawStorage = {
 export type GenerationDeps = {
   provider: LlmProvider;
   storage: RawStorage;
+  /** Layer 3 deps; absent means candidates are checked by layers 1-2 only. */
+  semantic?: SemanticDedupe | null;
 };
 
 export type JobProgress = {
@@ -311,6 +313,7 @@ async function ingestStage(job: AiGenerationJob, deps: GenerationDeps): Promise<
       stem: candidate.draft.stem,
       optionBodies: candidate.draft.options.map((o) => o.body),
     })),
+    { semantic: deps.semantic },
   );
 
   const now = nowMs();

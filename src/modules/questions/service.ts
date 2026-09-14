@@ -27,7 +27,7 @@ import {
 } from "@/db/schema";
 import { ApiError, notFound, validationError } from "@/lib/errors";
 import { recordAudit } from "@/modules/audit";
-import { checkCandidate } from "@/modules/dedupe";
+import { checkCandidate, type SemanticDedupe } from "@/modules/dedupe";
 import { simhashHex } from "@/modules/dedupe/simhash";
 import { normalizeStem } from "./normalize";
 import {
@@ -232,6 +232,12 @@ export type CreateQuestionOptions = {
   origin?: "manual" | "ai" | "import" | "seed";
   createdBy?: string | null;
   generationJobId?: string | null;
+  /**
+   * Layer 3 dependencies. Supplied by the edge route when the Workers AI and
+   * Vectorize bindings exist; absent means layer 3 is skipped and reported as
+   * degraded rather than assumed clean.
+   */
+  semantic?: SemanticDedupe | null;
 };
 
 function assertValid(draft: QuestionDraft): { warnings: ValidationIssue[]; language: string } {
@@ -249,12 +255,19 @@ function assertValid(draft: QuestionDraft): { warnings: ValidationIssue[]; langu
  * Layer-1 duplicate gate. Returns the verdict so the caller can reuse the
  * computed hashes instead of hashing the same draft twice.
  */
-async function guardDuplicate(draft: QuestionDraft, excludeQuestionId?: string) {
-  const verdict = await checkCandidate({
-    stem: draft.stem,
-    optionBodies: draft.options.map((o) => o.body),
-    excludeQuestionId,
-  });
+async function guardDuplicate(
+  draft: QuestionDraft,
+  excludeQuestionId?: string,
+  semantic?: SemanticDedupe | null,
+) {
+  const verdict = await checkCandidate(
+    {
+      stem: draft.stem,
+      optionBodies: draft.options.map((o) => o.body),
+      excludeQuestionId,
+    },
+    { semantic },
+  );
 
   if (verdict.autoReject && verdict.bestMatch) {
     throw new ApiError("DUPLICATE", "This question already exists in the bank.", {
@@ -320,7 +333,7 @@ export async function createQuestion(
   options: CreateQuestionOptions = {},
 ): Promise<QuestionWriteResult> {
   const { warnings, language } = assertValid(draft);
-  const verdict = await guardDuplicate(draft);
+  const verdict = await guardDuplicate(draft, undefined, options.semantic);
 
   const now = nowMs();
   const row = questionRow(
@@ -349,6 +362,7 @@ export async function updateQuestion(
   id: string,
   patch: Partial<QuestionDraft>,
   actorId: string,
+  options: { semantic?: SemanticDedupe | null } = {},
 ): Promise<QuestionWriteResult> {
   const existing = await getQuestionForAdmin(id);
 
@@ -378,7 +392,7 @@ export async function updateQuestion(
   };
 
   const { warnings, language } = assertValid(draft);
-  const verdict = await guardDuplicate(draft, id);
+  const verdict = await guardDuplicate(draft, id, options.semantic);
   const now = nowMs();
 
   await db().batch([

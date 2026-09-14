@@ -1,6 +1,7 @@
 import { errorResponse, jsonResponse } from "@/lib/errors";
 import { requireAdmin } from "@/modules/auth";
 import { createQuestion, listQuestionsForAdmin } from "@/modules/questions";
+import { resolveSemanticDedupe } from "@/modules/dedupe";
 import { parseQuestionCreate } from "./parse";
 
 /**
@@ -41,7 +42,9 @@ export async function POST(request: Request) {
     const { question, warnings } = await createQuestion(
       parseQuestionCreate(body),
       actor.id,
-      { status: status as never },
+      // Layer 3 runs when the AI/Vectorize bindings exist, and degrades to
+      // layers 1-2 otherwise (§13.8).
+      { status: status as never, semantic: resolveSemanticDedupe() },
     );
 
     return jsonResponse({ question, warnings }, { status: 201 });

@@ -18,6 +18,7 @@ import { computeDedupeHashes } from "@/modules/questions/normalize";
 import { getDedupeThresholds, type DedupeThresholds } from "@/modules/settings";
 import { findExactDuplicate, type ExactMatch } from "./layer1-exact";
 import { classifyTextSimilarity, findTextDuplicates } from "./layer2-text";
+import { findSemanticMatches, type SemanticDedupe } from "./layer3-semantic";
 
 /** D1 caps bound parameters per statement at ~100; stay clearly under. */
 const MAX_BOUND_PARAMS = 90;
@@ -54,6 +55,12 @@ export type CandidateInput = {
 export type CheckOptions = {
   /** Pass pre-read thresholds to avoid re-querying inside a batch. */
   thresholds?: DedupeThresholds;
+  /**
+   * Layer 3 dependencies. When absent, layer 3 is SKIPPED and reported as
+   * degraded rather than treated as "clean" (§13.8) — callers at the edge
+   * supply these when the bindings exist.
+   */
+  semantic?: SemanticDedupe | null;
 };
 
 /** Layer 1 + layer 2 for a single candidate. */
@@ -165,6 +172,61 @@ export async function checkCandidates(
       }
     }
 
+    // ── Layer 3: embeddings + vector index ────────────────────────────────
+    // A failure here must NOT fail the write: degrade and carry on (§13.8).
+    if (options.semantic) {
+      try {
+        const semanticMatches = await findSemanticMatches({
+          stem: drafts[index]!.stem,
+          optionBodies: drafts[index]!.optionBodies,
+          semantic: options.semantic,
+          topK: 5,
+          threshold: thresholds.semanticReview * 0.9,
+          excludeQuestionId: options.excludeQuestionId,
+        });
+
+        const bestSemantic = semanticMatches[0];
+        if (bestSemantic && bestSemantic.score >= thresholds.semanticReview) {
+          verdicts.push({
+            status: "semantic_dup",
+            layer: "semantic",
+            normalizedHash: hash.normalizedHash,
+            contentHash: hash.contentHash,
+            bestMatch: {
+              questionId: bestSemantic.questionId,
+              stem: "",
+              similarity: bestSemantic.score,
+              layer: "semantic",
+            },
+            allMatches: semanticMatches.map((m) => ({
+              questionId: m.questionId,
+              stem: "",
+              similarity: m.score,
+              layer: "semantic" as const,
+            })),
+            // Again: evidence, never a verdict (§13.6).
+            autoReject: false,
+            degraded: [],
+          });
+          continue;
+        }
+
+        verdicts.push({
+          status: "clean",
+          layer: null,
+          normalizedHash: hash.normalizedHash,
+          contentHash: hash.contentHash,
+          bestMatch: null,
+          allMatches: [],
+          autoReject: false,
+          degraded: [],
+        });
+        continue;
+      } catch (error) {
+        console.error("Layer 3 unavailable; degrading to layers 1-2", error);
+      }
+    }
+
     verdicts.push({
       status: "clean",
       layer: null,
@@ -182,6 +244,11 @@ export async function checkCandidates(
 
 export { findExactDuplicate, type ExactMatch };
 export { findTextDuplicates, jaccard, contentWords, classifyTextSimilarity } from "./layer2-text";
+export { resolveSemanticDedupe, semanticDedupeAvailable } from "./adapters";
+export { backfillEmbeddings, embeddingCoverage, type BackfillResult } from "./backfill";
+export { embeddingText, cosineSimilarity, featureHashEmbedder, workersAiEmbedder, type Embedder } from "./embeddings";
+export { memoryVectorIndex, vectorizeIndex, vectorIdFor, questionIdFromVectorId, type VectorIndex, type VectorMatch } from "./vector-index";
+export { findSemanticMatches, type SemanticDedupe, type SemanticMatch } from "./layer3-semantic";
 export {
   sweepExistingQuestions,
   listDuplicateFlags,

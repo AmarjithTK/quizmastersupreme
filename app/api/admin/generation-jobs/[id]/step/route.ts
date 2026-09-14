@@ -1,6 +1,7 @@
 import { errorResponse, jsonResponse } from "@/lib/errors";
 import { requireAdmin } from "@/modules/auth";
 import { configuredProvider, r2RawStorage, runGenerationStep } from "@/modules/ai";
+import { resolveSemanticDedupe } from "@/modules/dedupe";
 
 /**
  * POST /api/admin/generation-jobs/:id/step — advance the job by ONE bounded step.
@@ -26,6 +27,7 @@ export async function POST(request: Request, context: RouteContext) {
     const progress = await runGenerationStep(id, {
       provider: configuredProvider(),
       storage: r2RawStorage(),
+      semantic: resolveSemanticDedupe(),
     });
 
     return jsonResponse({ progress });
