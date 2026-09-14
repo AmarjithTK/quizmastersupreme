@@ -9,6 +9,7 @@ export {
   createQuestion,
   updateQuestion,
   setQuestionStatus,
+  bulkSetQuestionStatus,
   archiveQuestion,
   getQuestionForAdmin,
   listQuestionsForAdmin,
@@ -19,6 +20,17 @@ export {
   type QuestionWriteResult,
   type CreateQuestionOptions,
 } from "./service";
+
+export { parseCsv, toCsv, csvCell, rowsToObjects } from "./csv";
+export {
+  importQuestions,
+  recordToDraft,
+  IMPORT_COLUMNS,
+  type ImportReport,
+  type ImportRowResult,
+  type ImportRowStatus,
+} from "./import";
+export { exportQuestionsCsv } from "./export";
 
 export {
   validateQuestion,

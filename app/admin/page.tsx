@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { FileQuestion, LayoutGrid, ListChecks } from "lucide-react";
+import { FileQuestion, History, LayoutGrid, ListChecks } from "lucide-react";
 import { getCurrentPageUser } from "@/lib/server/get-current-user";
 import { ForbiddenCard } from "@/components/admin/forbidden";
 import { listCategoriesForAdmin, listSetsForAdmin } from "@/modules/catalog";
@@ -58,6 +58,12 @@ export default async function AdminPage() {
           icon={<FileQuestion className="size-5" />}
           title="Questions"
           subtitle="The shared bank, reusable across sets"
+        />
+        <AdminTile
+          href="/admin/audit"
+          icon={<History className="size-5" />}
+          title="Audit log"
+          subtitle="Every content change, with before/after"
         />
       </div>
 

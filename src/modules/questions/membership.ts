@@ -124,7 +124,13 @@ export async function attachQuestions(
   return { added: toInsert.length, skipped: unique.length - toInsert.length };
 }
 
-/** Detach from THIS set only — the question row itself is untouched. */
+/**
+ * Detach from THIS set only — the question row itself is untouched.
+ *
+ * The returned count is what was ACTUALLY attached and removed, resolved with a
+ * SELECT first: D1's `meta.changes` counts physical writes including index
+ * entries, so it cannot be used as a row count.
+ */
 export async function detachQuestions(
   setId: string,
   questionIds: string[],
@@ -133,16 +139,34 @@ export async function detachQuestions(
   const unique = [...new Set(questionIds)].filter(Boolean);
   if (unique.length === 0) return 0;
 
-  await db()
-    .delete(questionSetQuestions)
-    .where(
-      and(eq(questionSetQuestions.setId, setId), inArray(questionSetQuestions.questionId, unique)),
-    );
+  const attached = new Set<string>();
+  for (let i = 0; i < unique.length; i += MAX_BOUND_PARAMS) {
+    const chunk = unique.slice(i, i + MAX_BOUND_PARAMS);
+    const rows = await db()
+      .select({ questionId: questionSetQuestions.questionId })
+      .from(questionSetQuestions)
+      .where(
+        and(eq(questionSetQuestions.setId, setId), inArray(questionSetQuestions.questionId, chunk)),
+      );
+    for (const row of rows) attached.add(row.questionId);
+  }
+
+  if (attached.size === 0) return 0;
+
+  const targets = [...attached];
+  for (let i = 0; i < targets.length; i += MAX_BOUND_PARAMS) {
+    const chunk = targets.slice(i, i + MAX_BOUND_PARAMS);
+    await db()
+      .delete(questionSetQuestions)
+      .where(
+        and(eq(questionSetQuestions.setId, setId), inArray(questionSetQuestions.questionId, chunk)),
+      );
+  }
 
   await recordAudit(actorId, "set.detach_questions", "quiz_set", setId, null, {
-    questionIds: unique,
+    questionIds: targets,
   });
-  return unique.length;
+  return targets.length;
 }
 
 /** Rewrite the order of a set's questions to match `orderedQuestionIds`. */

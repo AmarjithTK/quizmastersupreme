@@ -9,8 +9,9 @@
  * /api/admin/questions.
  */
 
-import { Archive, FileText, Pencil, Plus, Search, CheckCircle2 } from "lucide-react";
+import { Archive, CheckCircle2, Download, FileText, Pencil, Plus, Search, Upload, X } from "lucide-react";
 import { useState, useTransition } from "react";
+import { QuestionImport } from "@/components/admin/QuestionImport";
 import {
   EMPTY_QUESTION,
   QuestionEditor,
@@ -54,9 +55,14 @@ export function QuestionBank({ initial }: { initial: { rows: QuestionRow[]; tota
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingFields, setEditingFields] = useState<QuestionEditorFields | null>(null);
 
+  // M9: bulk selection + CSV import panel.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [importing, setImporting] = useState(false);
+
   const [busy, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [notice, setNotice] = useState<string | null>(null);
 
   async function api<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await fetch(path, {
@@ -173,6 +179,40 @@ export function QuestionBank({ initial }: { initial: { rows: QuestionRow[]; tota
       await load();
     });
 
+  /** M9 — change the status of everything currently ticked, in one request. */
+  const bulkStatus = (next: string) =>
+    run(async () => {
+      const ids = [...selected];
+      if (ids.length === 0) return;
+      const result = await api<{ updated: number; failed: Array<{ id: string; reason: string }> }>(
+        "/api/admin/questions/bulk-status",
+        { method: "POST", body: JSON.stringify({ ids, status: next }) },
+      );
+      setNotice(
+        `Set ${result.updated} ${result.updated === 1 ? "question" : "questions"} to ${next}.` +
+          (result.failed.length > 0 ? ` ${result.failed.length} could not be updated.` : ""),
+      );
+      setSelected(new Set());
+      await load();
+    });
+
+  const toggleSelected = (id: string, checked: boolean) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+
+  const allOnPageSelected = rows.length > 0 && rows.every((r) => selected.has(r.id));
+
+  /** Export honours the SAME filters currently applied to the list. */
+  const exportParams = new URLSearchParams();
+  if (query.trim()) exportParams.set("q", query.trim());
+  if (status) exportParams.set("status", status);
+  if (difficulty) exportParams.set("difficulty", difficulty);
+  const exportHref = `/api/admin/questions/export?${exportParams.toString()}`;
+
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   // ── render ─────────────────────────────────────────────────────────────
@@ -208,6 +248,23 @@ export function QuestionBank({ initial }: { initial: { rows: QuestionRow[]; tota
             <Plus className="size-4" />
             New question
           </button>
+
+          <button
+            type="button"
+            onClick={() => setImporting((v) => !v)}
+            className="inline-flex items-center gap-2 rounded-xl border border-dashed border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 hover:border-slate-400 hover:bg-white"
+          >
+            <Upload className="size-4" />
+            Import CSV
+          </button>
+
+          <a
+            href={exportHref}
+            className="inline-flex items-center gap-2 rounded-xl border border-dashed border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 hover:border-slate-400 hover:bg-white"
+          >
+            <Download className="size-4" />
+            Export CSV
+          </a>
 
           <form
             className="ml-auto flex flex-wrap items-center gap-2"
@@ -252,10 +309,93 @@ export function QuestionBank({ initial }: { initial: { rows: QuestionRow[]; tota
         </div>
       )}
 
-      <p className="text-xs text-slate-500">
-        {total} {total === 1 ? "question" : "questions"}
-        {query.trim() && <> matching “{query.trim()}”</>}
-      </p>
+      {importing && (
+        <QuestionImport
+          onImported={() => run(() => load(1))}
+          onClose={() => setImporting(false)}
+        />
+      )}
+
+      {notice && (
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-900">
+          <span>{notice}</span>
+          <button
+            type="button"
+            onClick={() => setNotice(null)}
+            aria-label="Dismiss"
+            className="rounded p-0.5 text-sky-700 hover:bg-sky-100"
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
+      )}
+
+      {selected.size > 0 && (
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-900/10 bg-slate-900 px-3 py-2 text-sm text-white">
+          <span className="font-medium">
+            {selected.size} selected
+          </span>
+          <div className="ml-auto flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => bulkStatus("published")}
+              className="rounded-lg bg-emerald-500/90 px-3 py-1.5 text-xs font-semibold hover:bg-emerald-500 disabled:opacity-50"
+            >
+              Publish
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => bulkStatus("review")}
+              className="rounded-lg bg-white/15 px-3 py-1.5 text-xs font-semibold hover:bg-white/25 disabled:opacity-50"
+            >
+              Send to review
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => bulkStatus("draft")}
+              className="rounded-lg bg-white/15 px-3 py-1.5 text-xs font-semibold hover:bg-white/25 disabled:opacity-50"
+            >
+              Back to draft
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => bulkStatus("archived")}
+              className="rounded-lg bg-red-500/80 px-3 py-1.5 text-xs font-semibold hover:bg-red-500 disabled:opacity-50"
+            >
+              Archive
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelected(new Set())}
+              className="rounded-lg px-2 py-1.5 text-xs font-medium text-white/70 hover:text-white"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="flex items-center gap-3">
+        <p className="text-xs text-slate-500">
+          {total} {total === 1 ? "question" : "questions"}
+          {query.trim() && <> matching “{query.trim()}”</>}
+        </p>
+        {rows.length > 0 && (
+          <button
+            type="button"
+            onClick={() =>
+              setSelected(allOnPageSelected ? new Set() : new Set(rows.map((r) => r.id)))
+            }
+            className="text-xs font-medium text-slate-500 underline underline-offset-2 hover:text-slate-800"
+          >
+            {allOnPageSelected ? "Clear selection" : `Select all ${rows.length} on this page`}
+          </button>
+        )}
+      </div>
 
       <ul className="flex flex-col gap-2">
         {rows.map((row) =>
@@ -276,6 +416,13 @@ export function QuestionBank({ initial }: { initial: { rows: QuestionRow[]; tota
             </li>
           ) : (
             <li key={row.id} className="flex items-start gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2.5">
+              <input
+                type="checkbox"
+                checked={selected.has(row.id)}
+                onChange={(e) => toggleSelected(row.id, e.target.checked)}
+                aria-label={`Select question: ${row.stem.slice(0, 60)}`}
+                className="mt-1 size-4 shrink-0 rounded border-slate-300"
+              />
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <StatusBadge status={row.status} />

@@ -15,6 +15,7 @@ import * as schema from "@/db/schema";
 import type { QuestionDraft } from "@/modules/questions";
 import {
   attachQuestions,
+  bulkSetQuestionStatus,
   createQuestion,
   detachQuestions,
   getQuestionForAdmin,
@@ -347,6 +348,51 @@ describe("set membership", () => {
 
     // The question itself survives — it may belong to other sets.
     await expect(getQuestionForAdmin(question.id)).resolves.toBeTruthy();
+  });
+});
+
+// ── M9: bulk operations report ACCURATE counts ───────────────────────────────
+
+describe("bulk operations report accurate counts", () => {
+  it("bulkSetQuestionStatus counts rows that exist, not physical writes", async () => {
+    const created = [];
+    for (const stem of ["Bulk count alpha question?", "Bulk count bravo question?"]) {
+      const { question } = await createQuestion(draft({ stem }), ACTOR);
+      created.push(question.id);
+    }
+
+    // D1's meta.changes counts index writes too — updating ONE question with
+    // six indexes reported "7" before this was fixed, so assert exact numbers.
+    const two = await bulkSetQuestionStatus(created, "published", ACTOR);
+    expect(two.updated).toBe(2);
+    expect(two.failed).toEqual([]);
+
+    const one = await bulkSetQuestionStatus([created[0]!], "draft", ACTOR);
+    expect(one.updated).toBe(1);
+
+    const withFake = await bulkSetQuestionStatus([created[0]!, "no-such-id"], "draft", ACTOR);
+    expect(withFake.updated).toBe(1);
+    expect(withFake.failed).toHaveLength(1);
+    expect(withFake.failed[0]!.id).toBe("no-such-id");
+  });
+
+  it("bulkSetQuestionStatus rejects an unknown status", async () => {
+    const { question } = await createQuestion(draft({ stem: "Bulk bad status question?" }), ACTOR);
+    await expect(
+      bulkSetQuestionStatus([question.id], "live" as never, ACTOR),
+    ).rejects.toMatchObject({ code: "VALIDATION" });
+  });
+
+  it("detachQuestions returns what was ACTUALLY attached, not what was asked", async () => {
+    const { question } = await createQuestion(draft({ stem: "Detach count question?" }), ACTOR);
+    await attachQuestions(SET, [question.id], ACTOR);
+
+    // One attached, one never attached: the count must be 1, not 2.
+    const removed = await detachQuestions(SET, [question.id, "never-attached-id"], ACTOR);
+    expect(removed).toBe(1);
+
+    // And detaching again removes nothing.
+    expect(await detachQuestions(SET, [question.id], ACTOR)).toBe(0);
   });
 });
 

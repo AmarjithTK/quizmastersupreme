@@ -53,6 +53,17 @@ const QUESTION_STATUSES: readonly QuestionStatus[] = [
   "archived",
 ];
 
+/**
+ * Ceiling on how many FTS hits feed a filtered query.
+ *
+ * Hits are bm25-ranked before the cap, so this keeps the most relevant rows
+ * rather than an arbitrary slice. Beyond it, the admin should narrow the search.
+ */
+const MAX_FTS_CANDIDATES = 1000;
+
+/** D1 caps bound parameters per statement at ~100; stay clearly under. */
+const MAX_BOUND_PARAMS = 90;
+
 // ── read helpers ─────────────────────────────────────────────────────────────
 
 export type QuestionWithOptions = Question & {
@@ -152,16 +163,26 @@ export async function listQuestionsForAdmin(
   if (filters.q?.trim()) {
     const match = buildFtsMatch(filters.q);
     if (match) {
-      // questions_fts is a virtual table, so it is queried with raw SQL rather
-      // than through the Drizzle schema.
-      const hits = await db().all<{ question_id: string }>(
-        sql`SELECT question_id FROM questions_fts WHERE questions_fts MATCH ${match} LIMIT 500`,
+      /**
+       * A SUBQUERY, not `inArray(ids)`.
+       *
+       * D1 allows ~100 bound parameters per statement. Feeding an FTS hit list
+       * back through `inArray` produced one parameter PER HIT, so a broad search
+       * over a large bank generated hundreds of parameters and the query failed
+       * outright with "too many SQL variables".
+       *
+       * Passing the MATCH string as a single parameter and letting SQLite do the
+       * ranking also means ORDER BY rank is applied to the candidate set itself,
+       * so the cap keeps the BEST matches rather than an arbitrary slice.
+       */
+      conditions.push(
+        sql`${questions.id} in (
+          select question_id from questions_fts
+          where questions_fts match ${match}
+          order by rank
+          limit ${MAX_FTS_CANDIDATES}
+        )`,
       );
-      const ids = hits.map((h) => h.question_id);
-      if (ids.length === 0) {
-        return { rows: [], total: 0, page, pageSize };
-      }
-      conditions.push(inArray(questions.id, ids));
     }
   }
 
@@ -426,6 +447,76 @@ export async function setQuestionStatus(
 /** Archived, not deleted — attempts reference answers via question_id. */
 export async function archiveQuestion(id: string, actorId: string): Promise<Question> {
   return setQuestionStatus(id, "archived", actorId);
+}
+
+/**
+ * Bulk status change (M9).
+ *
+ * One UPDATE per chunk of ids rather than one per question, because the admin
+ * UI lets you select a whole page. `coalesce` keeps the FIRST approval
+ * attribution: re-publishing an already-approved question must not overwrite
+ * who originally vouched for it (§2.2).
+ *
+ * NOTE ON COUNTING: D1's `meta.changes` is NOT the number of rows matched — it
+ * counts physical writes including index entries, so updating ONE question with
+ * six indexes reports 7. The affected ids are therefore resolved with a SELECT
+ * first and the count comes from that, not from the driver.
+ */
+export async function bulkSetQuestionStatus(
+  ids: string[],
+  status: QuestionStatus,
+  actorId: string,
+): Promise<{ updated: number; failed: Array<{ id: string; reason: string }> }> {
+  if (!QUESTION_STATUSES.includes(status)) {
+    throw validationError(`Unknown status "${status}".`);
+  }
+
+  const unique = [...new Set(ids)].filter(Boolean);
+  if (unique.length === 0) return { updated: 0, failed: [] };
+
+  // Which of the requested ids actually exist?
+  const existing = new Set<string>();
+  for (let i = 0; i < unique.length; i += MAX_BOUND_PARAMS) {
+    const chunk = unique.slice(i, i + MAX_BOUND_PARAMS);
+    const rows = await db()
+      .select({ id: questions.id })
+      .from(questions)
+      .where(inArray(questions.id, chunk));
+    for (const row of rows) existing.add(row.id);
+  }
+
+  const approving = status === "approved" || status === "published";
+  const now = nowMs();
+  const targets = unique.filter((id) => existing.has(id));
+
+  for (let i = 0; i < targets.length; i += MAX_BOUND_PARAMS) {
+    const chunk = targets.slice(i, i + MAX_BOUND_PARAMS);
+    await db()
+      .update(questions)
+      .set({
+        status,
+        approvedBy: approving
+          ? sql`coalesce(${questions.approvedBy}, ${actorId})`
+          : sql`${questions.approvedBy}`,
+        approvedAt: approving
+          ? sql`coalesce(${questions.approvedAt}, ${now})`
+          : sql`${questions.approvedAt}`,
+        updatedAt: now,
+      })
+      .where(inArray(questions.id, chunk));
+  }
+
+  await recordAudit(actorId, "question.bulk_status", "question", null, null, {
+    requested: unique.length,
+    updated: targets.length,
+    status,
+  });
+
+  const failed = unique
+    .filter((id) => !existing.has(id))
+    .map((id) => ({ id, reason: "No question with that id exists." }));
+
+  return { updated: targets.length, failed };
 }
 
 export { normalizeStem };

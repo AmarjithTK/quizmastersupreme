@@ -18,7 +18,7 @@
 
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "@/db/client";
-import { categories, questionSetQuestions, quizSets } from "@/db/schema";
+import { categories, questions, questionSetQuestions, quizSets } from "@/db/schema";
 import { buildFtsMatch } from "@/modules/questions";
 
 export type SetSearchHit = {
@@ -35,26 +35,23 @@ export type SetSearchHit = {
 };
 
 const MAX_FTS_HITS = 200;
+/** D1 caps bound parameters per statement at ~100; stay clearly under. */
+const MAX_BOUND_PARAMS = 90;
 
 export async function searchSets(rawQuery: string, limit = 20): Promise<SetSearchHit[]> {
   const query = rawQuery.trim();
   if (query.length < 2) return [];
 
+  // 1. Does the query match any question text at all? (FTS5, bm25-ranked)
+  //
+  // The match string is passed to the subqueries below rather than materialising
+  // an id list: D1 allows ~100 bound parameters per statement, and `inArray`
+  // with a few hundred FTS hits blows straight through that.
   const match = buildFtsMatch(query);
   const needle = `%${query.toLowerCase()}%`;
 
-  // 1. Which questions match the text? (FTS5, porter-stemmed)
-  const ftsHits = match
-    ? await db().all<{ question_id: string; stem: string }>(
-        sql`SELECT question_id, stem FROM questions_fts WHERE questions_fts MATCH ${match} LIMIT ${MAX_FTS_HITS}`,
-      )
-    : [];
-
-  const questionIds = ftsHits.map((h) => h.question_id);
-  const stemById = new Map(ftsHits.map((h) => [h.question_id, h.stem]));
-
-  // 2a. Sets containing those questions.
-  const byQuestion = questionIds.length
+  // 2a. Sets containing a question that matches the text.
+  const byQuestion = match
     ? await db()
         .select({
           setId: quizSets.id,
@@ -68,7 +65,12 @@ export async function searchSets(rawQuery: string, limit = 20): Promise<SetSearc
         .innerJoin(categories, eq(categories.id, quizSets.categoryId))
         .where(
           and(
-            inArray(questionSetQuestions.questionId, questionIds),
+            sql`${questionSetQuestions.questionId} in (
+              select question_id from questions_fts
+              where questions_fts match ${match}
+              order by rank
+              limit ${MAX_FTS_HITS}
+            )`,
             eq(quizSets.status, "published"),
             eq(categories.status, "published"),
           ),
@@ -92,6 +94,19 @@ export async function searchSets(rawQuery: string, limit = 20): Promise<SetSearc
         sql`(lower(${quizSets.title}) like ${needle} or lower(${categories.title}) like ${needle})`,
       ),
     );
+
+  // Stems for the matched questions, fetched in bounded chunks (D1 caps bound
+  // parameters per statement at ~100).
+  const matchedQuestionIds = [...new Set(byQuestion.map((r) => r.questionId))];
+  const stemById = new Map<string, string>();
+  for (let i = 0; i < matchedQuestionIds.length; i += MAX_BOUND_PARAMS) {
+    const chunk = matchedQuestionIds.slice(i, i + MAX_BOUND_PARAMS);
+    const rows = await db()
+      .select({ id: questions.id, stem: questions.stem })
+      .from(questions)
+      .where(inArray(questions.id, chunk));
+    for (const row of rows) stemById.set(row.id, row.stem);
+  }
 
   // 3. Merge.
   const merged = new Map<string, SetSearchHit>();
