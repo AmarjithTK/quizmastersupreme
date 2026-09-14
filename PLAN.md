@@ -49,6 +49,41 @@
 
 **Amendment rule:** changing §2 requires editing this file with a dated changelog entry in §25.6. Don't quietly diverge.
 
+### 0.1 Build status
+
+| Milestone | Status |
+|---|---|
+| **M0 — Foundation and risk spike** | ✅ **Done and verified** (local). Committed as `6ea6303`. |
+| M1 — Auth and roles | Not started — **blocked on decision D-1** (Workers Paid vs managed auth) |
+| M2 onward | Not started |
+
+M0 delivered: the full 17-table schema with both migrations, a local D1 workflow
+(generate → migrate → seed → query), the domain module layout, screens 1 and 2
+rendering live D1 data, normalization + SimHash, a `/api/health` probe with real
+database connectivity, and **37 passing tests** that pin the §2 constraints.
+
+Deviations from this document, recorded rather than hidden:
+
+1. **Layout uses a root `app/` directory** (the scaffolder's convention) with all
+   domain code under `src/`, instead of `src/app/`. Same structure, one level up.
+2. **Only the D1 binding is active** in `wrangler.jsonc`; R2, Queues and Vectorize
+   are present but commented out. Wiring unprovisioned bindings breaks local dev
+   for no benefit before M10/M12.
+3. **SimHash uses word unigrams, not token 3-grams**, with a measured threshold of
+   16 rather than 6 — see the revision note in §13.3. The original figure was
+   wrong for short question stems and measurement caught it.
+4. **Normalization preserves Unicode Marks (`\p{M}`)**, not just Letters. Indic
+   vowel signs and anusvaras are Marks; omitting them silently corrupts Malayalam
+   stems. A regression test guards this.
+5. **Seeding writes questions directly** rather than through
+   `modules/questions.createQuestion()`, which does not exist until M4. The hashes
+   are computed exactly as that funnel will compute them, so no migration is needed
+   when the funnel lands.
+
+**Not yet verified: deployment.** No Cloudflare credentials were available in this
+session, so M0's "deploys to a `*.workers.dev` URL" exit test and the remote-D1 FTS5
+check remain **outstanding**. Everything else in M0 passed locally.
+
 ---
 
 ## 1. Product definition
@@ -195,10 +230,15 @@ Every piece is either first-party Cloudflare or a plain library. There is no Kub
 **Verified facts (2026-09-14):**
 
 - `cloudflare/vinext` exists and is real — a Vite plugin reimplementing the Next.js API surface, with Workers as the primary target.
-- It is at **`v0.0.41`**.
+- The scaffolded project resolved **`vinext@1.0.0-beta.9`** (Vite 8.3, React 19.3, TypeScript 7.0). This is further along than the `v0.0.41` seen at drafting time — the beta line is a good sign, but it is still a beta.
 - Its own README states: *"Under active development... it is not yet a drop-in replacement for every application or production workload. Expect compatibility gaps."*
 - The same README explicitly recommends **[OpenNext](https://opennext.js.org/) as "the safer, more proven option"** for anyone who wants maturity.
 - Known gaps include incomplete Cache Components / Partial Prerendering, no build-time image optimization, and native modules (`sharp`, `lightningcss`, `satori`) failing in App Router **development** mode.
+
+> **M0 spike result: PASSED.** App Router dynamic routes, `force-dynamic` server
+> components reading D1, Tailwind v4, lucide icons and route handlers all work
+> under `vinext dev`. The hedge in §2.7 remains in place as insurance, but there
+> is currently no reason to invoke it.
 
 **Decision: use vinext, but write the app so it can run on either toolchain.**
 
@@ -319,6 +359,11 @@ Admin UI → polls GET /api/admin/generation-jobs/:id
 ---
 
 ## 5. Repository layout
+
+> **As-built note:** the tree below shows `src/app/`. The scaffold put `app/` at the
+> repository root instead and that convention was kept — Next.js/vinext place it
+> there by default. Everything else matches: domain code in `src/modules/`, schema in
+> `src/db/schema/`, bindings in `src/lib/cloudflare/`. Files marked ✅ exist today.
 
 ```
 quizmaster-supreme/
@@ -1675,26 +1720,50 @@ Layer 1 must run **before** any LLM call and before any DB insert. It is the che
 
 ### 13.3 Layer 2a — simhash prefilter
 
-A 64-bit SimHash over token 3-grams of the normalized stem, stored as 16 hex chars. Hamming distance ≤ 6 → near-duplicate candidate.
+A 64-bit SimHash over **word unigrams** of the normalized stem, stored as 16 hex chars.
+
+> **Revised during M0, based on measurement.** The original design used token
+> 3-grams with a Hamming threshold of ≤ 6. That was wrong for this corpus.
+> Question stems are short (5–15 tokens), so a 3-gram signature has very few
+> grams and ONE changed word perturbs most of them: a mere spelling variant
+> (`organisation` → `organization`) measured **23 bits** apart — indistinguishable
+> from an unrelated question. Unigrams keep one changed word to one changed
+> feature.
+
+Measured Hamming distances on real stems from `seed/questions.json`:
+
+| Pair | Distance |
+|---|---|
+| identical / case + punctuation only | 0 |
+| one-word spelling variant | 10 |
+| paraphrase ("Who created Linux?" vs "Who was the original developer of the Linux kernel?") | 12 |
+| same topic, different fact | 24 |
+| different topic | 28 |
+| unrelated | 36 |
+
+**Threshold: ≤ 16** (`SIMHASH_NEAR_DUPLICATE_MAX_DISTANCE`), which sits in the gap
+with margin on both sides. These are prefilter bands only — the thresholds that
+actually drive admin review decisions live in `app_settings` (§13.4) so they can be
+tuned without a deploy.
 
 ```ts
 // modules/dedupe/simhash.ts
 export function simhash64(text: string): bigint {
-  const tokens = shingles(normalizeStem(text), 3);   // token 3-grams
-  const v = new Array<number>(64).fill(0);
-  for (const t of tokens) {
-    const h = fnv1a64(t);
+  const votes = new Array<number>(64).fill(0);
+  for (const gram of shingles(normalizeStem(text), 1)) {   // WORD UNIGRAMS
+    const h = fnv1a64(gram);
     for (let i = 0; i < 64; i++) {
-      v[i] += ((h >> BigInt(i)) & 1n) === 1n ? 1 : -1;
+      const bit = (h >> BigInt(i)) & 1n;
+      votes[i] = (votes[i] ?? 0) + (bit === 1n ? 1 : -1);
     }
   }
   let out = 0n;
-  for (let i = 0; i < 64; i++) if (v[i] > 0) out |= (1n << BigInt(i));
+  for (let i = 0; i < 64; i++) if ((votes[i] ?? 0) > 0) out |= 1n << BigInt(i);
   return out;
 }
 ```
 
-Cheap, pure TypeScript, no dependencies. Since every question stores its simhash, a scan is a linear pass with a popcount — acceptable for tens of thousands of rows inside a queue consumer, and unnecessary in the hot path.
+Cheap, pure TypeScript, no dependencies. Since every question stores its simhash, a scan is a linear pass with a popcount — acceptable for tens of thousands of rows inside a queue consumer, and unnecessary in the hot path. It is a **coarse prefilter**: FTS5 + Jaccard does the real work at layer 2, and embeddings do the semantic work at layer 3.
 
 ### 13.4 Layer 2b — FTS5 candidate retrieval
 
@@ -2603,3 +2672,4 @@ VERDICT  semantic_dup, similarity 0.94, bestMatch #1842, autoReject false
 |---|---|
 | 2026-09-14 | Initial plan. Content model frozen at 2 levels (Category → Set) per explicit instruction. Stack fixed on vinext + D1 + Drizzle + shadcn/ui + OpenRouter + Vectorize. Three-layer dedupe funnel specified. Milestones M0–M15 defined. Decisions D-1…D-10 raised. |
 | 2026-09-14 | Added §17.5–17.10: verified deployment cost model. Confirmed against live Cloudflare pricing. Result: **~$5/month at 10 users** and effectively flat to ~1,000 users; real cost is one-time content generation ($4–$103 for a 10,000-question bank), not infrastructure. Identified Workers Free's 10 ms CPU cap as the binding auth blocker and D1's 100k rows/day free write cap as the bulk-import hazard. |
+| 2026-09-14 | Product renamed to **Quiz Master Supreme**. Added §0.1 build status. **M0 implemented and verified locally** — see §0.1. Corrected §3.3 (vinext resolved at `1.0.0-beta.9`, spike passed) and §13.3 (SimHash switched from 3-grams to unigrams; threshold 6 → 16, based on measured distances). Recorded five as-built deviations in §0.1. Outstanding: the deploy half of M0's exit test. |
