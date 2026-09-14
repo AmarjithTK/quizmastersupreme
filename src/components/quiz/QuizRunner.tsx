@@ -58,6 +58,7 @@ export function QuizRunner({
 
   const [pending, setPending] = useState<OptionKey | null>(null);
   const [revealLoading, setRevealLoading] = useState(false);
+  const nextButtonRef = useRef<HTMLButtonElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [finishing, setFinishing] = useState(false);
 
@@ -200,6 +201,12 @@ export function QuizRunner({
 
   const question = loaded.get(index);
   const reveal = question ? reveals.get(question.questionId) : undefined;
+
+  // A11y (M14): when a reveal lands, move focus to "Next question" so a
+  // keyboard-only user does not have to tab past the whole backstory block.
+  useEffect(() => {
+    if (reveal) nextButtonRef.current?.focus();
+  }, [reveal]);
   const progressPct =
     attempt.totalQuestions > 0
       ? Math.round((attempt.answeredCount / attempt.totalQuestions) * 100)
@@ -305,7 +312,12 @@ export function QuizRunner({
         {/* ── reveal ────────────────────────────────────────────────────── */}
         {reveal && (
           <div className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-5 sm:p-6">
-            <div className="flex items-center gap-2">
+            {/*
+              aria-live=polite: a keyboard user who just chose an option gets
+              the verdict announced without focus being yanked anywhere, and
+              the Next button then receives focus so continuing is one Enter.
+            */}
+            <div aria-live="polite" className="flex items-center gap-2">
               {reveal.isCorrect ? (
                 <>
                   <CheckCircle2 className="size-5 text-emerald-600" />
@@ -334,6 +346,7 @@ export function QuizRunner({
 
             <div className="flex justify-end">
               <button
+                ref={nextButtonRef}
                 type="button"
                 onClick={next}
                 className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white hover:bg-slate-700"

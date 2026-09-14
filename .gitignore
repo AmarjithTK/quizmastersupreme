@@ -12,3 +12,5 @@ next-env.d.ts
 # local build artifacts
 tsconfig.tsbuildinfo
 .vinext/
+.tooling/backups/
+

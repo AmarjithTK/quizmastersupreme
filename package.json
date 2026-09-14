@@ -48,6 +48,9 @@
     "db:reset:local": "rm -rf .wrangler/state/v3/d1 && pnpm db:migrate:local",
     "seed": "tsx scripts/seed.ts",
     "reindex:fts": "tsx scripts/reindex-fts.ts",
-    "dev:admin-token": "tsx scripts/dev-admin-token.ts"
+    "dev:admin-token": "tsx scripts/dev-admin-token.ts",
+    "backup": "tsx scripts/backup.ts",
+    "restore": "tsx scripts/restore.ts",
+    "deploy:staging": "vinext-cloudflare deploy --config wrangler.staging.jsonc"
   }
 }

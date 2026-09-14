@@ -20,6 +20,12 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
   return (
     <html lang="en">
       <body className="min-h-screen bg-slate-50 text-slate-900 antialiased">
+        <a
+          href="#main"
+          className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-lg focus:bg-slate-900 focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-white"
+        >
+          Skip to content
+        </a>
         <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/85 backdrop-blur">
           <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-4 px-4">
             <Link
@@ -103,7 +109,7 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
           </div>
         </header>
 
-        <main className="mx-auto max-w-6xl px-4 py-6 sm:py-8">{children}</main>
+        <main id="main" className="mx-auto max-w-6xl px-4 py-6 sm:py-8">{children}</main>
 
         <footer className="mx-auto max-w-6xl px-4 pb-10 pt-4 text-xs text-slate-400">
           Quiz Master Supreme

@@ -48,6 +48,8 @@ export const notFound = (message = "Not found") => new ApiError("NOT_FOUND", mes
 export const validationError = (message: string, details?: unknown) =>
   new ApiError("VALIDATION", message, details);
 export const conflict = (message: string) => new ApiError("CONFLICT", message);
+export const rateLimited = (message = "Too many requests. Try again shortly.") =>
+  new ApiError("RATE_LIMITED", message);
 
 export function errorResponse(error: unknown): Response {
   if (error instanceof ApiError) {

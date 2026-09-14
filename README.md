@@ -1,8 +1,8 @@
 # Quiz Master Supreme
 
 A two-surface quiz platform: a user-facing card grid for browsing and taking quizzes
-with rich post-answer explanations, and an admin console for authoring content and
-reviewing AI-generated questions.
+with rich post-answer explanations, and an admin console for authoring content, running
+AI-assisted generation with a human review gate, and triaging duplicates.
 
 **Read [`PLAN.md`](./PLAN.md) first.** It is the contract for this codebase — the frozen
 design constraints in §2 explain *why* the code is shaped the way it is.
@@ -16,31 +16,29 @@ design constraints in §2 explain *why* the code is shaped the way it is.
 | Database | **Cloudflare D1** (SQLite) — identical engine locally and in production |
 | ORM | Drizzle ORM + Drizzle Kit |
 | Search | D1 **FTS5** (virtual table + triggers) |
-| Tests | Vitest (unit) + real local D1 (integration) |
+| Dedupe | SimHash (L1) → FTS+Jaccard (L2) → embeddings (L3, Workers AI/Vectorize) |
+| AI generation | OpenRouter provider behind a transport-agnostic pipeline |
+| Tests | Vitest (unit) + real local D1 (integration) — **270 tests** |
 
 ## Current status
 
-**v0.1 complete and verified locally** — milestones M0–M6. See `PLAN.md` §0.1 for the
-as-built status and §20 for the roadmap.
+**M0–M13 implemented and verified locally.** See `PLAN.md` §0.1 for the as-built status
+and §20 for the roadmap. Highlights:
 
-Built so far:
+- ✅ Full schema with migrations (18 tables), FTS5, CHECK / partial-unique constraints
+- ✅ Google-only auth (OIDC + PKCE), D1 sessions, admin role gate
+- ✅ Admin: categories, quiz sets, questions, set membership — CRUD with validation + audit trail
+- ✅ The question funnel: validate → normalize → dedupe (3 layers) → insert on every write path
+- ✅ Quiz runner (timed mock exams, resume, server-owned clock), results, history, dashboard, search
+- ✅ CSV import/export with dry run, bulk status changes
+- ✅ AI generation with review gate, coverage-aware prompts, acceptance reporting by prompt version
+- ✅ Dedupe sweep + triage UI; FTS search; embeddings with a disposable, backfillable index
+- ✅ M14 hardening: rate limits, error boundaries, backup/restore (rehearsed by test), staging config,
+  keyboard accessibility (skip link, focus management, live regions)
 
-- ✅ Full schema with migrations (18 tables), including FTS5 and every CHECK / partial-unique constraint
-- ✅ Local D1 workflow: generate → migrate → seed → query
-- ✅ Domain module layout (`src/modules/**`) with zero React inside it
-- ✅ Google-only auth (OIDC + PKCE, not Firebase), D1 sessions, admin role gate
-- ✅ Admin: subjects, quiz sets, questions, set membership — all CRUD with validation and an audit trail
-- ✅ The question funnel: validate → normalize → dedupe layer 1 → insert (every write path uses it)
-- ✅ Screen 1 (subject grid + Continue banner) and Screen 2 (set grid with per-set progress)
-- ✅ Screen 3: the quiz runner with timer, question map, inline reveal and rich backstories
-- ✅ Resume that survives closing the browser; results, history and an account dashboard
-- ✅ 129 tests, including every §18.2 constraint test
-
-Not built yet: dedupe layers 2–3 (M11–M12), AI generation (M10), CSV import (M9).
-
-**Never run on a deployed Worker.** Everything above is verified against local D1 with
-`vinext dev`. The deploy half of the M0/M1 exit tests, and the live Google round-trip,
-still need real credentials — see "Deploying" below.
+**Never run on a deployed Worker.** Everything is verified against local D1 with `vinext dev`.
+The live OpenRouter, Workers AI/Vectorize, Google login and deploy round-trips still need real
+credentials/resources — see "Deploying".
 
 ## Getting started
 
@@ -51,7 +49,7 @@ pnpm install
 pnpm db:migrate:local
 pnpm seed
 
-pnpm dev          # http://localhost:3000
+pnpm dev          # http://localhost:3000 (vinext dev)
 ```
 
 To exercise the admin screens without Google credentials, mint a local session:
@@ -69,6 +67,7 @@ pnpm dev:admin-token
 | `pnpm build` | Production Worker build |
 | `pnpm start` | Run the built Worker locally via Wrangler |
 | `pnpm deploy` | Deploy to Cloudflare Workers |
+| `pnpm deploy:staging` | Deploy to the isolated staging Worker (`wrangler.staging.jsonc`) |
 | `pnpm typecheck` | `tsc --noEmit` |
 | `pnpm test` | Unit + integration tests (builds a clean test DB automatically) |
 | `pnpm dev:admin-token` | **Local only.** Mint an admin session for testing without Google |
@@ -78,26 +77,91 @@ pnpm dev:admin-token
 | `pnpm db:reset:local` | Wipe and rebuild the local database |
 | `pnpm seed` | Load `seed/*.json` (idempotent) |
 | `pnpm reindex:fts` | Rebuild the FTS5 index from `questions` |
+| `pnpm backup` | Dump the dev D1 to `.tooling/backups/backup-<ts>.json` |
+| `pnpm restore --file <.json>` | **Destructive.** Wipe the dev D1 and restore that backup |
+
+## Operations runbook (M14)
+
+### Backup & restore
+
+The product's value is the question bank, so restore is *rehearsed*, not assumed:
+`tests/integration/backup-restore.test.ts` exports the database, wipes it, imports it back,
+and proves FTS search still works afterwards. The script path and the test share
+`src/modules/backup` — the same code.
+
+```bash
+pnpm backup                                  # every table → .tooling/backups/backup-<ts>.json
+pnpm restore --file .tooling/backups/backup-2026-09-14T19-12-11-341Z.json
+```
+
+Restore wipes every table first (children-first, FKs off for the wipe). The FTS5 table is
+**not** backed up — its insert/delete triggers rebuild it from `questions`.
+
+**Production:** back up remotely with `wrangler d1 export quizmaster-supreme-db --remote --no-schema > backup.sql`
+(or upload a `pnpm backup` JSON to R2) on a schedule, and restore with
+`wrangler d1 execute quizmaster-supreme-db --remote --file backup.sql`. The restore path is
+tested locally; rehearse it remotely before you need it.
+
+### Staging
+
+`wrangler.staging.jsonc` points at a **separate** Worker (`*-staging`) and D1 database, with
+`APP_ENV=staging`:
+
+```bash
+wrangler d1 create quizmaster-supreme-db-staging   # paste UUID into wrangler.staging.jsonc
+pnpm db:migrate:remote --config wrangler.staging.jsonc  # apply to staging D1
+pnpm deploy:staging
+```
+
+Same code, isolated data. Production `wrangler.jsonc` is untouched.
+
+### Rate limits
+
+In-memory fixed-window limits per IP: `auth` 30/15 min, `attempts` 30/min, `answer` 60/min,
+`admin` 30/min, `search` 60/min (`src/modules/rate-limit`). They guard against surprise
+bursts; they are **not** a defence against distributed attacks — a real deployment should add
+a managed edge rate limiter in front.
+
+### Failure handling
+
+- `app/error.tsx` / `app/global-error.tsx` — render errors show a message + retry, never a stack trace.
+- `app/not-found.tsx` — friendly 404.
+- Every API route returns the single `{ error: { code, message } }` envelope (`src/lib/errors.ts`),
+  with `RATE_LIMITED` (429) from the limiter.
+
+### Accessibility
+
+- Skip-to-content link in the root layout.
+- Quiz runner: `aria-live` announcement of the verdict, and focus moves to **Next question**
+  after a reveal so a keyboard-only user never tabs through the backstory.
+- All interactive elements are native buttons/links with visible focus rings.
+- Screen-reader labels on icon-only controls (e.g. sign-out).
 
 ## Things that will bite you
 
-These are non-obvious and each one has already cost time once:
+Non-obvious, and each one has already cost time once:
 
 1. **Migrations are append-only.** Never edit an applied migration. Add a new one.
 2. **`migrations/0001_fts5.sql` is hand-written.** Drizzle cannot model FTS5 virtual
    tables or triggers. It is registered in `migrations/meta/_journal.json` as `idx 1`
    so the next `drizzle-kit generate` emits `0002` instead of colliding.
 3. **Bulk inserts must be chunked.** D1 rejects statements with too many bound
-   parameters. See the `insertChunked` helper in `scripts/seed.ts`.
-4. **`wrangler types` must be re-run** after changing `wrangler.jsonc`. Bindings are
-   typed from the generated `worker-configuration.d.ts`.
-5. **Only `src/lib/cloudflare/bindings.ts` may import `cloudflare:workers`**
-   (PLAN.md §2.7). This is what keeps a vinext → OpenNext migration to one file.
-6. **`--persist-to X` ≠ `getPlatformProxy({ persist: { path: X } })`.** The CLI
-   resolves to `X/v3/...` and the proxy to `X/...`. That is why tests apply the
-   migration files directly in `tests/global-setup.ts` rather than shelling out.
+   parameters. See `insertChunked` in `scripts/seed.ts` and `CHUNK_ROWS` in
+   `src/modules/backup`.
+4. **`wrangler types` must be re-run** after changing `wrangler.jsonc` (and its
+   `wrangler.staging.jsonc` twin). Bindings are typed from the generated file.
+5. **Only `src/lib/cloudflare/bindings.ts` may import `cloudflare:workers`** (PLAN.md §2.7).
+   This is what keeps a vinext → OpenNext migration to one file. It is also why
+   `scripts/*.ts` never import `@/db/client` — Node cannot load that scheme.
+6. **`--persist-to X` ≠ `getPlatformProxy({ persist: { path: X } })`.** The CLI resolves
+   to `X/v3/...` and the proxy to `X/...`. Tests apply migration files directly in
+   `tests/global-setup.ts` rather than shelling out.
 7. **The content tree is exactly two levels deep** — Category → Quiz Set. There is no
-   `parent_id` anywhere, by design, and a test enforces it.
+   `parent_id` anywhere, by design, and a test enforces it (PLAN.md §2.1).
+8. **vinext dev is a singleton per workspace.** If a stale dev server holds the lock
+   (`node_modules/.vinext`-adjacent `.vinext/dev/lock.json`), delete the lock file
+   before starting a new one.
+9. **The rate limiter resets on every Worker restart** — per-instance memory by design.
 
 ## Adding a category icon
 
@@ -111,13 +175,25 @@ class names like `bg-${color}-50`.
 
 ## Deploying
 
-Not yet configured — `wrangler.jsonc` carries a placeholder D1 `database_id`.
+Not yet deployed — `wrangler.jsonc` carries a placeholder D1 `database_id`, and the
+`vectorize`/`ai` bindings stay commented until those resources exist (uncommenting them
+before creation breaks local dev).
 
 ```bash
-wrangler d1 create quizmaster-supreme-db   # then paste the UUID into wrangler.jsonc
+wrangler d1 create quizmaster-supreme-db      # paste the UUID into wrangler.jsonc
 pnpm db:migrate:remote
+# .dev.vars → real secrets: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, SESSION_SECRET,
+# OPENROUTER_API_KEY (CLI secrets for production: `wrangler secret put ...`)
 pnpm deploy
 ```
 
-R2, Queues and Vectorize bindings are commented out in `wrangler.jsonc` and get
-enabled at M10/M12 — wiring them before their resources exist breaks local dev.
+Required before a production launch (each item is called out in PLAN.md §0.1 as unverified):
+
+1. **Google OAuth** — real client id/secret, authorised JS origins + redirect URIs
+   (`/api/auth/google/callback`), `googleEnabled()` gate off by default.
+2. **OpenRouter key** — without it, generation jobs cannot run past `queued`.
+3. **Workers AI + Vectorize** — create the embedding model binding and the
+   `quizmaster-supreme-questions` index, then uncomment the bindings in `wrangler.jsonc`
+   and run the embeddings backfill.
+4. **R2 bucket** — `quizmaster-supreme-assets` (raw model responses).
+5. **Staging round** — deploy staging, run the E2E flow there, then production.

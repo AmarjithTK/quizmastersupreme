@@ -1,4 +1,5 @@
 import { ApiError } from "@/lib/errors";
+import { enforceRateLimit } from "@/modules/rate-limit";
 import {
   authConfig,
   consumeOAuthState,
@@ -19,6 +20,7 @@ import {
  */
 
 export async function GET(request: Request) {
+  enforceRateLimit(request, "auth");
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");

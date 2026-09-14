@@ -1,4 +1,5 @@
 import { errorResponse, jsonResponse } from "@/lib/errors";
+import { enforceRateLimit } from "@/modules/rate-limit";
 import { requireUser } from "@/modules/auth";
 import { submitAnswer } from "@/modules/quiz";
 import type { OptionKey } from "@/db/schema";
@@ -18,6 +19,7 @@ import type { OptionKey } from "@/db/schema";
 type RouteContext = { params: Promise<{ id: string }> };
 
 export async function POST(request: Request, context: RouteContext) {
+  enforceRateLimit(request, "answer");
   try {
     const user = await requireUser(request);
     const { id } = await context.params;

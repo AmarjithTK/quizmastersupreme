@@ -1,4 +1,5 @@
 import { errorResponse, jsonResponse } from "@/lib/errors";
+import { enforceRateLimit } from "@/modules/rate-limit";
 import { searchSets } from "@/modules/search";
 
 /**
@@ -10,6 +11,7 @@ import { searchSets } from "@/modules/search";
  */
 export async function GET(request: Request) {
   try {
+    enforceRateLimit(request, "search");
     const q = new URL(request.url).searchParams.get("q") ?? "";
     const sets = await searchSets(q, 20);
     return jsonResponse({ query: q.trim(), count: sets.length, sets });

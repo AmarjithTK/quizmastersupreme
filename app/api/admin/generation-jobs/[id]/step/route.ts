@@ -1,4 +1,5 @@
 import { errorResponse, jsonResponse } from "@/lib/errors";
+import { enforceRateLimit } from "@/modules/rate-limit";
 import { requireAdmin } from "@/modules/auth";
 import { configuredProvider, r2RawStorage, runGenerationStep } from "@/modules/ai";
 import { resolveSemanticDedupe } from "@/modules/dedupe";
@@ -22,6 +23,7 @@ type RouteContext = { params: Promise<{ id: string }> };
 export async function POST(request: Request, context: RouteContext) {
   try {
     await requireAdmin(request);
+    enforceRateLimit(request, "admin");
     const { id } = await context.params;
 
     const progress = await runGenerationStep(id, {

@@ -1,4 +1,5 @@
 import { errorResponse } from "@/lib/errors";
+import { enforceRateLimit } from "@/modules/rate-limit";
 import {
   authConfig,
   buildAuthorizationUrl,
@@ -16,6 +17,7 @@ import {
 
 export async function GET(request: Request) {
   try {
+    enforceRateLimit(request, "auth");
     if (!googleEnabled()) {
       const login = new URL("/login", request.url);
       login.searchParams.set("error", "Google sign-in is not configured yet.");
