@@ -74,21 +74,34 @@ describe("AI generation settings", () => {
 });
 
 describe("provider routing settings (only/order)", () => {
-  it("round-trips only + order and rejects bad slugs", async () => {
-    const saved = await updateProviderRouting(
-      { only: ["together", "baidu", "deepinfra"], order: ["together", "deepinfra", "baidu"] },
-      ACTOR,
-    );
-    expect(saved.only).toEqual(["together", "baidu", "deepinfra"]);
-    expect(saved.order).toEqual(["together", "deepinfra", "baidu"]);
+  it("round-trips `only` on its own", async () => {
+    const saved = await updateProviderRouting({ only: ["together", "deepinfra"] }, ACTOR);
+    expect(saved.only).toEqual(["together", "deepinfra"]);
+    expect(saved.order).toEqual([]);
+  });
 
+  it("round-trips `order` on its own", async () => {
+    const saved = await updateProviderRouting({ order: ["together", "baidu", "deepinfra"] }, ACTOR);
+    expect(saved.order).toEqual(["together", "baidu", "deepinfra"]);
+    expect(saved.only).toEqual([]);
+  });
+
+  it("REJECTS both `only` and `order` at the same time", async () => {
+    await updateProviderRouting({ only: ["together"] }, ACTOR);
     await expect(
-      updateProviderRouting({ only: ["not!/valid"] }, ACTOR),
-    ).rejects.toThrow("Invalid provider slug");
+      updateProviderRouting({ only: ["together"], order: ["deepinfra"] }, ACTOR),
+    ).rejects.toThrow("not both");
 
-    // A bad batch must not partially apply.
+    // Nothing changed: the failed save must not partially apply.
     const after = await getProviderRouting();
-    expect(after.only).toEqual(["together", "baidu", "deepinfra"]);
+    expect(after.only).toEqual(["together"]);
+    expect(after.order).toEqual([]);
+  });
+
+  it("rejects bad slugs", async () => {
+    await expect(updateProviderRouting({ only: ["not!/valid"] }, ACTOR)).rejects.toThrow(
+      "Invalid provider slug",
+    );
   });
 
   it("deduplicates and lowercases slugs", async () => {

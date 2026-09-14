@@ -23,25 +23,38 @@ type Props = {
 };
 
 const join = (slugs: string[]) => slugs.join(", ");
-const split = (raw: string) =>
-  raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+const split = (raw: string) => raw.split(",").map((s) => s.trim()).filter(Boolean);
+
+/** `only` and `order` are mutually exclusive — one mode at a time. */
+type RoutingMode = "none" | "only" | "order";
+
+function modeOf(routing: Routing): RoutingMode {
+  if (routing.only.length > 0) return "only";
+  if (routing.order.length > 0) return "order";
+  return "none";
+}
 
 export function AiSettingsPanel({ initial, initialRouting, providers, modelPresets }: Props) {
   const [provider, setProvider] = useState(initial.provider);
   const [model, setModel] = useState(initial.model);
-  const [only, setOnly] = useState(join(initialRouting.only));
-  const [order, setOrder] = useState(join(initialRouting.order));
+  const [mode, setMode] = useState<RoutingMode>(modeOf(initialRouting));
+  const [slugs, setSlugs] = useState(
+    initialRouting.only.length > 0
+      ? join(initialRouting.only)
+      : join(initialRouting.order),
+  );
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
 
   useEffect(() => {
     setProvider(initial.provider);
     setModel(initial.model);
-    setOnly(join(initialRouting.only));
-    setOrder(join(initialRouting.order));
+    setMode(modeOf(initialRouting));
+    setSlugs(
+      initialRouting.only.length > 0
+        ? join(initialRouting.only)
+        : join(initialRouting.order),
+    );
   }, [initial, initialRouting]);
 
   async function save() {
@@ -54,8 +67,8 @@ export function AiSettingsPanel({ initial, initialRouting, providers, modelPrese
         body: JSON.stringify({
           provider,
           model: model.trim(),
-          providerOnly: split(only),
-          providerOrder: split(order),
+          providerOnly: mode === "only" ? split(slugs) : [],
+          providerOrder: mode === "order" ? split(slugs) : [],
         }),
       });
       const body = (await res.json()) as {
@@ -118,39 +131,68 @@ export function AiSettingsPanel({ initial, initialRouting, providers, modelPrese
 
       <h3 className="mt-5 text-sm font-semibold text-slate-800">
         Provider routing{" "}
-        <span className="font-normal text-slate-400">(OpenRouter provider.only / provider.order)</span>
+        <span className="font-normal text-slate-400">(provider.only · provider.order)</span>
       </h3>
       <p className="mt-1 text-xs text-slate-500">
         Pin the exact providers that may serve these models so costs are
         predictable. <code className="font-mono">only</code> = allow-list;{" "}
-        <code className="font-mono">order</code> = priority. Comma-separated
-        OpenRouter slugs, e.g.{" "}
-        <code className="font-mono">together, deepinfra</code>. Leave blank for
-        OpenRouter default routing. Nothing else is sent — no sorting, latency,
-        pricing or ZDR options.
+        <code className="font-mono">order</code> = priority.{" "}
+        <span className="font-semibold text-slate-700">Pick one — the two cannot be set together.</span>{" "}
+        Nothing else is sent: no sorting, latency, pricing or ZDR options.
       </p>
 
-      <label className="mt-4 block text-sm font-medium text-slate-700" htmlFor="ai-provider-only">
-        only
-      </label>
-      <input
-        id="ai-provider-only"
-        value={only}
-        onChange={(e) => setOnly(e.target.value)}
-        placeholder="together, deepinfra"
-        className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-900/10"
-      />
+      <fieldset className="mt-4">
+        <legend className="sr-only">Routing mode</legend>
+        <div className="flex flex-wrap gap-2">
+          {(
+            [
+              ["none", "Default routing"],
+              ["only", "only — allow-list"],
+              ["order", "order — priority"],
+            ] as Array<[RoutingMode, string]>
+          ).map(([value, label]) => (
+            <label
+              key={value}
+              className={[
+                "cursor-pointer rounded-lg border px-3 py-1.5 text-sm font-medium",
+                mode === value
+                  ? "border-slate-900 bg-slate-900 text-white"
+                  : "border-slate-300 bg-white text-slate-600 hover:bg-slate-50",
+              ].join(" ")}
+            >
+              <input
+                type="radio"
+                name="routing-mode"
+                value={value}
+                checked={mode === value}
+                onChange={() => setMode(value)}
+                className="sr-only"
+              />
+              {label}
+            </label>
+          ))}
+        </div>
+      </fieldset>
 
-      <label className="mt-4 block text-sm font-medium text-slate-700" htmlFor="ai-provider-order">
-        order
-      </label>
-      <input
-        id="ai-provider-order"
-        value={order}
-        onChange={(e) => setOrder(e.target.value)}
-        placeholder="together, baidu, deepinfra"
-        className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-900/10"
-      />
+      {mode !== "none" && (
+        <label className="mt-4 block text-sm font-medium text-slate-700" htmlFor="ai-routing-slugs">
+          {mode === "only" ? "Allowed providers" : "Preferred order"} (comma-separated OpenRouter slugs)
+        </label>
+      )}
+      {mode === "none" && (
+        <p className="mt-4 text-xs text-slate-400">
+          No routing — OpenRouter picks the provider. Set one mode above to pin cost.
+        </p>
+      )}
+      {mode !== "none" && (
+        <input
+          id="ai-routing-slugs"
+          value={slugs}
+          onChange={(e) => setSlugs(e.target.value)}
+          placeholder={mode === "only" ? "together, deepinfra" : "together, baidu, deepinfra"}
+          className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-900/10"
+        />
+      )}
 
       <div className="mt-5 flex items-center gap-3">
         <button

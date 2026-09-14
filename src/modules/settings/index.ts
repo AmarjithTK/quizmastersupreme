@@ -239,6 +239,11 @@ export async function getProviderRouting(): Promise<ProviderRouting> {
  * Persist routing. Slugs are validated (lowercase, `[a-z0-9_-]`); duplicates
  * are dropped. Only the two allowed shapes are ever written — nothing else in
  * the OpenRouter routing schema is touched (no sorting/latency/pricing).
+ *
+ * HARD RULE: `only` and `order` are mutually exclusive — pick ONE mode. Sending
+ * both is rejected because a routing that is both an allow-list AND a priority
+ * list is the quickest way to get unpredictable costs, which is the exact
+ * problem this setting exists to solve.
  */
 export async function updateProviderRouting(
   patch: Partial<ProviderRouting>,
@@ -257,7 +262,24 @@ export async function updateProviderRouting(
 
   const only = clean(patch.only);
   const order = clean(patch.order);
-  if (only !== undefined) await setSetting(ROUTING_ONLY_KEY, only, actorId);
-  if (order !== undefined) await setSetting(ROUTING_ORDER_KEY, order, actorId);
+
+  if (only && only.length > 0 && order && order.length > 0) {
+    throw new Error("Pick one routing mode: provider.only OR provider.order, not both.");
+  }
+
+  if (only !== undefined && order !== undefined) {
+    // Both fields given (the UI always sends both): they express the FULL
+    // routing state — either exactly one is non-empty, or both are empty.
+    await setSetting(ROUTING_ONLY_KEY, only, actorId);
+    await setSetting(ROUTING_ORDER_KEY, order, actorId);
+  } else if (only !== undefined) {
+    // Picking `only` clears `order`.
+    await setSetting(ROUTING_ONLY_KEY, only, actorId);
+    await setSetting(ROUTING_ORDER_KEY, [], actorId);
+  } else if (order !== undefined) {
+    // Picking `order` clears `only`.
+    await setSetting(ROUTING_ORDER_KEY, order, actorId);
+    await setSetting(ROUTING_ONLY_KEY, [], actorId);
+  }
   return getProviderRouting();
 }
