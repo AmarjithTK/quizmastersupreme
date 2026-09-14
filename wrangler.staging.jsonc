@@ -50,7 +50,7 @@
     "APP_BASE_URL": "https://staging.quizmastersupreme.app",
     "GOOGLE_CLIENT_ID": "",
     "ADMIN_EMAILS": "",
-    "DEFAULT_GENERATION_MODEL": "anthropic/claude-sonnet-4.5",
+    "DEFAULT_GENERATION_MODEL": "deepseek/deepseek-v4-flash-0731",
     "EMBEDDING_MODEL": "@cf/baai/bge-m3"
   },
 

@@ -121,3 +121,82 @@ export async function listSettings(): Promise<Array<{ key: string; value: string
 }
 
 export { KEYS as DEDUPE_SETTING_KEYS };
+
+// ── AI generation settings (provider + model) ─────────────────────────────────
+
+/**
+ * The provider is deliberately locked to OpenRouter. The pipeline is provider-
+ * agnostic (an `LlmProvider`), but this settings screen only ever offers
+ * OpenRouter — one provider, one key, fewer surprises. Swap the value here and
+ * the adapter in `modules/ai` if that ever changes.
+ */
+export const AI_PROVIDERS = ["openrouter"] as const;
+export type AiProvider = (typeof AI_PROVIDERS)[number];
+
+export const DEFAULT_AI_MODEL = "deepseek/deepseek-v4-flash-0731";
+
+export const AI_MODEL_PRESETS = [
+  "deepseek/deepseek-v4-flash-0731",
+  "deepseek/deepseek-chat-v3-0324",
+  "anthropic/claude-sonnet-4.5",
+  "anthropic/claude-3.5-haiku",
+  "openai/gpt-4o-mini",
+  "meta-llama/llama-3.3-70b-instruct",
+  "google/gemini-2.0-flash-001",
+] as const;
+
+export type AiGenerationSettings = {
+  provider: AiProvider;
+  model: string;
+};
+
+const AI_PROVIDER_KEY = "ai.provider";
+const AI_MODEL_KEY = "ai.model";
+
+export async function getAiGenerationSettings(): Promise<AiGenerationSettings> {
+  const rows = await db()
+    .select({ key: appSettings.key, value: appSettings.value })
+    .from(appSettings)
+    .where(inArray(appSettings.key, [AI_PROVIDER_KEY, AI_MODEL_KEY]));
+
+  const stored = new Map(rows.map((row) => [row.key, row.value]));
+  const providerRaw = stored.get(AI_PROVIDER_KEY);
+  const modelRaw = stored.get(AI_MODEL_KEY);
+
+  const provider: AiProvider = AI_PROVIDERS.includes(providerRaw as AiProvider)
+    ? (providerRaw as AiProvider)
+    : "openrouter";
+
+  // Values are stored JSON-encoded (setSetting JSON.stringifies), so unwrap.
+  function unwrap(raw: string | undefined): string | null {
+    if (raw == null) return null;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      return typeof parsed === "string" ? parsed : null;
+    } catch {
+      return raw.trim().length > 0 ? raw.trim() : null;
+    }
+  }
+
+  const model = unwrap(modelRaw) ?? DEFAULT_AI_MODEL;
+
+  return { provider, model };
+}
+
+export async function updateAiGenerationSettings(
+  patch: Partial<AiGenerationSettings>,
+  actorId: string,
+): Promise<AiGenerationSettings> {
+  if (patch.provider !== undefined) {
+    if (!AI_PROVIDERS.includes(patch.provider)) {
+      throw new Error(`Unsupported provider "${patch.provider}". Only OpenRouter is available.`);
+    }
+    await setSetting(AI_PROVIDER_KEY, patch.provider, actorId);
+  }
+  if (patch.model !== undefined) {
+    const model = patch.model.trim();
+    if (!model) throw new Error("Model name cannot be empty.");
+    await setSetting(AI_MODEL_KEY, model, actorId);
+  }
+  return getAiGenerationSettings();
+}

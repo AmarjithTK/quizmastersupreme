@@ -3,6 +3,7 @@ import { logInfo } from "@/lib/logger";
 import { bindings } from "@/lib/cloudflare/bindings";
 import { requireAdmin } from "@/modules/auth";
 import { createGenerationJob, listJobs, openRouterKeyConfigured } from "@/modules/ai";
+import { getAiGenerationSettings } from "@/modules/settings";
 
 /**
  * /api/admin/generation-jobs
@@ -32,6 +33,14 @@ export async function POST(request: Request) {
     const actor = await requireAdmin(request);
     const body = (await request.json()) as Record<string, unknown>;
 
+    // Model: explicit per-job override wins, else the admin-stored default,
+    // else the baked-in default (PLAN.md §12 / settings).
+    const aiSettings = await getAiGenerationSettings();
+    const model =
+      typeof body.model === "string" && body.model.trim()
+        ? body.model.trim()
+        : aiSettings.model;
+
     const job = await createGenerationJob(
       {
         topic: typeof body.topic === "string" ? body.topic : "",
@@ -44,7 +53,7 @@ export async function POST(request: Request) {
         avoidTopics: Array.isArray(body.avoidTopics)
           ? body.avoidTopics.filter((s): s is string => typeof s === "string")
           : null,
-        model: typeof body.model === "string" ? body.model : "",
+        model,
         targetCategoryId: typeof body.targetCategoryId === "string" ? body.targetCategoryId : null,
         targetSetId: typeof body.targetSetId === "string" ? body.targetSetId : null,
       },

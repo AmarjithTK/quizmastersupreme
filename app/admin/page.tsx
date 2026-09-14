@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { ClipboardCheck, CopyCheck, FileQuestion, History, LayoutGrid, ListChecks, Sparkles } from "lucide-react";
+import { ClipboardCheck, CopyCheck, FileQuestion, History, LayoutGrid, ListChecks, Settings2, Sparkles } from "lucide-react";
 import { getCurrentPageUser } from "@/lib/server/get-current-user";
 import { ForbiddenCard } from "@/components/admin/forbidden";
 import { listCategoriesForAdmin, listSetsForAdmin } from "@/modules/catalog";
@@ -92,6 +92,12 @@ export default async function AdminPage() {
           subtitle={
             openDuplicates > 0 ? `${openDuplicates} pairs to check` : "No open flags"
           }
+        />
+        <AdminTile
+          href="/admin/settings"
+          icon={<Settings2 className="size-5" />}
+          title="Settings"
+          subtitle="Generation provider and default model"
         />
       </div>
 

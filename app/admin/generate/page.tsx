@@ -4,6 +4,7 @@ import { getCurrentPageUser } from "@/lib/server/get-current-user";
 import { bindings } from "@/lib/cloudflare/bindings";
 import { listCategoriesForAdmin } from "@/modules/catalog";
 import { listJobs, openRouterKeyConfigured, promptVersionStats, type PromptVersionStats } from "@/modules/ai";
+import { getAiGenerationSettings } from "@/modules/settings";
 import { GenerationPanel } from "@/components/admin/GenerationPanel";
 import { ForbiddenCard } from "@/components/admin/forbidden";
 
@@ -21,10 +22,11 @@ export default async function AdminGeneratePage() {
   if (!user) redirect("/login");
   if (user.role !== "admin") return <ForbiddenCard />;
 
-  const [jobs, categories, stats] = await Promise.all([
+  const [jobs, categories, stats, aiSettings] = await Promise.all([
     listJobs(30),
     listCategoriesForAdmin(),
     promptVersionStats(),
+    getAiGenerationSettings(),
   ]);
 
   return (
@@ -70,7 +72,7 @@ export default async function AdminGeneratePage() {
           createdAt: job.createdAt,
         }))}
         configured={openRouterKeyConfigured()}
-        defaultModel={bindings().DEFAULT_GENERATION_MODEL}
+        defaultModel={aiSettings.model}
         categories={categories.map((c) => ({ id: c.id, title: c.title }))}
       />
     </div>
