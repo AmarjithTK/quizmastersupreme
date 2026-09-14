@@ -45,6 +45,7 @@
     "db:migrate:remote": "wrangler d1 migrations apply quizmaster-supreme-db --remote",
     "db:reset:local": "rm -rf .wrangler/state/v3/d1 && pnpm db:migrate:local",
     "seed": "tsx scripts/seed.ts",
-    "reindex:fts": "tsx scripts/reindex-fts.ts"
+    "reindex:fts": "tsx scripts/reindex-fts.ts",
+    "dev:admin-token": "tsx scripts/dev-admin-token.ts"
   }
 }

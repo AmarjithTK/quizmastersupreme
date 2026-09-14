@@ -1,11 +1,20 @@
 # Local-only secrets. Never commit real values. Copy to .dev.vars and fill in.
 # Production equivalents: `wrangler secret put GOOGLE_CLIENT_SECRET` etc.
 
-# OAuth 2.0 Client credentials from Google Cloud Console
-# (APIs & Services → Credentials → Create OAuth client ID → Web application)
+# ── Google OAuth 2.0 client credentials ──────────────────────────────────────
+# Create: Google Cloud Console → APIs & Services → Credentials →
+#         Create OAuth client ID → Web application
 # Add the redirect URI: http://localhost:3000/api/auth/google/callback
+#
+# Google hands you a JSON file that contains these two values:
+#   GOOGLE_CLIENT_ID     -> JSON: "web" → "client_id"
+#   GOOGLE_CLIENT_SECRET -> JSON: "web" → "client_secret"
+#
+# GOOGLE_CLIENT_ID is not secret (it ships in every redirect URL); it lives
+# here for local dev and in wrangler.jsonc "vars" for deployed environments.
+GOOGLE_CLIENT_ID=""
 GOOGLE_CLIENT_SECRET=""
 
-# Signs nothing today (Google verifies tokens), but reserved for future
-# cookie-level integrity checks and CSRF tokens. Generate: `openssl rand -hex 32`
+# Reserved for future cookie-level integrity/CSRF use; Google verifies the
+# identity token itself today. Generate one with: openssl rand -hex 32
 SESSION_SECRET=""

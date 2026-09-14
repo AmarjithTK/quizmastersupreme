@@ -56,7 +56,8 @@
 | **M0 — Foundation and risk spike** | ✅ **Done and verified** (local). Committed as `6ea6303`. |
 | **M1 — Auth and roles** | ✅ **Done and verified** (local). Committed as part of the M1 commit. Google-only login, sessions in D1, admin role gate. The live Google round-trip needs real OAuth credentials. |
 | **M2 — Categories** | ✅ **Done and verified** (local). Admin CRUD at `/admin/categories`, validation, slug conflicts, reorder, publish/draft, archive, audit trail. Verified live: create→publish→home grid, 401 without session, 409/422 on bad input. |
-| M3 onward | Not started |
+| **M3 — Quiz sets** | ✅ **Done and verified** (local). Admin CRUD at `/admin/sets` with subject picker, group labels, mode/difficulty/timer/limits, reorder, publish/draft, archive. **M3 exit test passed live:** 6 sets across 2 group labels in Biology → screen 2 renders 3 labelled sections in the right order. 12 new domain tests. |
+| M4 onward | Not started |
 
 M0 delivered: the full 17-table schema with both migrations, a local D1 workflow
 (generate → migrate → seed → query), the domain module layout, screens 1 and 2
@@ -2696,3 +2697,4 @@ VERDICT  semantic_dup, similarity 0.94, bestMatch #1842, autoReject false
 | 2026-09-14 | Product renamed to **Quiz Master Supreme**. Added §0.1 build status. **M0 implemented and verified locally** — see §0.1. Corrected §3.3 (vinext resolved at `1.0.0-beta.9`, spike passed) and §13.3 (SimHash switched from 3-grams to unigrams; threshold 6 → 16, based on measured distances). Recorded five as-built deviations in §0.1. Outstanding: the deploy half of M0's exit test. |
 | 2026-09-14 | **M1 implemented and verified locally.** Decisions D-1/D-2/D-3 answered: Google-only login (direct OIDC, not Firebase), which makes D-1 (Workers Paid) moot — see §0.1 #6. Added migration `0002` (Google OIDC columns + `oauth_states`). Recorded three further as-built deviations (§0.1 #6–#8), including the `setDbForTests` test seam replacing `@cloudflare/vitest-pool-workers`. Test count 37 → 61. |
 | 2026-09-14 | **M2 implemented and verified locally.** Admin category CRUD: `/admin/categories` management screen, validation (title/slug/icon/accent allowlists), slug-conflict 409s, reorder, publish/draft toggle, archive-not-delete (§2.1 RESTRICT FK), audit trail on every mutation. Verified live with a minted admin session: create → publish → home grid, 401/409/422 behaviours. |
+| 2026-09-14 | **M3 implemented and verified locally.** Admin quiz-set CRUD at `/admin/sets`: subject picker, group labels, mode/difficulty/timer/question-limit/passing/shuffle, reorder within a subject, publish with one-time `publishedAt` stamping, archive. **Per-category slug uniqueness** enforced in the domain and covered by tests (the same slug IS allowed in different subjects). Added `pnpm dev:admin-token` — a local-only admin session minter for testing without Google. Test count 61 → 73. M3 exit test passed live. |

@@ -195,3 +195,76 @@ export async function listCategoriesForAdmin(): Promise<CategoryRowAdmin[]> {
     setCount: Number(row.setCount ?? 0),
   }));
 }
+
+// ── Quiz sets (depth 2) ──────────────────────────────────────────────────────
+
+export type SetRowAdmin = {
+  id: string;
+  categoryId: string;
+  categoryTitle: string;
+  slug: string;
+  title: string;
+  description: string | null;
+  groupLabel: string | null;
+  mode: "practice" | "mock";
+  difficulty: string;
+  timeLimitSeconds: number | null;
+  questionLimit: number | null;
+  shuffleQuestions: number;
+  shuffleOptions: number;
+  passingPercent: number | null;
+  sortOrder: number;
+  status: PublishState;
+  publishedAt: number | null;
+  questionCount: number;
+};
+
+/**
+ * Admin list of quiz sets, optionally narrowed to one category.
+ *
+ * One query: counts come from a LEFT JOIN + GROUP BY rather than a per-row
+ * subquery, the same discipline screens 1 and 2 use (§17.2).
+ */
+export async function listSetsForAdmin(categoryId?: string): Promise<SetRowAdmin[]> {
+  const rows = await db()
+    .select({
+      id: quizSets.id,
+      categoryId: quizSets.categoryId,
+      categoryTitle: categories.title,
+      slug: quizSets.slug,
+      title: quizSets.title,
+      description: quizSets.description,
+      groupLabel: quizSets.groupLabel,
+      mode: quizSets.mode,
+      difficulty: quizSets.difficulty,
+      timeLimitSeconds: quizSets.timeLimitSeconds,
+      questionLimit: quizSets.questionLimit,
+      shuffleQuestions: quizSets.shuffleQuestions,
+      shuffleOptions: quizSets.shuffleOptions,
+      passingPercent: quizSets.passingPercent,
+      sortOrder: quizSets.sortOrder,
+      status: quizSets.status,
+      publishedAt: quizSets.publishedAt,
+      questionCount: sql<number>`count(${questionSetQuestions.questionId})`,
+    })
+    .from(quizSets)
+    .innerJoin(categories, eq(categories.id, quizSets.categoryId))
+    .leftJoin(questionSetQuestions, eq(questionSetQuestions.setId, quizSets.id))
+    .where(categoryId ? eq(quizSets.categoryId, categoryId) : undefined)
+    .groupBy(quizSets.id)
+    .orderBy(
+      asc(categories.sortOrder),
+      asc(categories.title),
+      asc(quizSets.sortOrder),
+      asc(quizSets.title),
+    );
+
+  return rows.map((row) => ({
+    ...row,
+    // Same narrowing reason as categories: CHECK constraints do not narrow the
+    // Drizzle column type, and the admin UI needs the literal unions.
+    mode: row.mode as "practice" | "mock",
+    status: row.status as PublishState,
+    questionCount: Number(row.questionCount ?? 0),
+  }));
+}

@@ -9,9 +9,11 @@ export {
   getCategoryBySlug,
   listSetsForCategory,
   listCategoriesForAdmin,
+  listSetsForAdmin,
   groupSets,
   type CategoryCard,
   type SetCardData,
+  type SetRowAdmin,
 } from "./service";
 
 export {
@@ -23,5 +25,20 @@ export {
   type CreateCategoryInput,
   type UpdateCategoryInput,
 } from "./admin";
+
+export {
+  createSet,
+  updateSet,
+  setSetStatus,
+  archiveSet,
+  reorderSets,
+  SET_MODES,
+  SET_DIFFICULTIES,
+  SET_STATUSES,
+  type SetMode,
+  type SetStatus,
+  type CreateSetInput,
+  type UpdateSetInput,
+} from "./admin-sets";
 
 export { CATEGORY_ICONS, CATEGORY_ACCENTS, type CategoryIconName, type CategoryAccent } from "./content-options";
