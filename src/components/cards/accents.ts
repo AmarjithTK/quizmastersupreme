@@ -7,6 +7,8 @@
  * Every class below is written out in full, which is why this map exists.
  */
 
+import { CATEGORY_ACCENTS } from "@/modules/catalog";
+
 export type Accent = {
   tile: string;
   icon: string;
@@ -53,4 +55,4 @@ export function accentFor(token: string | null | undefined): Accent {
   return ACCENTS[token] ?? FALLBACK;
 }
 
-export const ACCENT_TOKENS = Object.keys(ACCENTS).sort();
+export const ACCENT_TOKENS: readonly string[] = CATEGORY_ACCENTS;

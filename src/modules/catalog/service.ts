@@ -14,6 +14,23 @@ import { and, asc, eq, sql } from "drizzle-orm";
 import { db } from "@/db/client";
 import { categories, questionSetQuestions, quizSets } from "@/db/schema";
 
+export type PublishState = "draft" | "published" | "archived";
+
+type CategoryRowAdmin = {
+  id: string;
+  slug: string;
+  title: string;
+  subtitle: string | null;
+  description: string | null;
+  icon: string | null;
+  accentColor: string | null;
+  sortOrder: number;
+  status: PublishState;
+  createdAt: number;
+  updatedAt: number;
+  setCount: number;
+};
+
 export type CategoryCard = {
   id: string;
   slug: string;
@@ -145,5 +162,36 @@ export function groupSets(sets: SetCardData[]): { label: string | null; sets: Se
   return order.map((key) => ({
     label: key === "" ? null : key,
     sets: buckets.get(key)!,
+  }));
+}
+
+/** Admin list: ALL categories regardless of status, for the management screen. */
+export async function listCategoriesForAdmin(): Promise<CategoryRowAdmin[]> {
+  const rows = await db()
+    .select({
+      id: categories.id,
+      slug: categories.slug,
+      title: categories.title,
+      subtitle: categories.subtitle,
+      description: categories.description,
+      icon: categories.icon,
+      accentColor: categories.accentColor,
+      sortOrder: categories.sortOrder,
+      status: categories.status,
+      createdAt: categories.createdAt,
+      updatedAt: categories.updatedAt,
+      setCount: sql<number>`count(${quizSets.id})`,
+    })
+    .from(categories)
+    .leftJoin(quizSets, eq(quizSets.categoryId, categories.id))
+    .groupBy(categories.id)
+    .orderBy(asc(categories.sortOrder), asc(categories.title));
+
+  return rows.map((row) => ({
+    ...row,
+    // The Drizzle column type is `string` even with a CHECK constraint; the
+    // union is asserted here so the admin UI gets a narrow status type.
+    status: row.status as PublishState,
+    setCount: Number(row.setCount ?? 0),
   }));
 }

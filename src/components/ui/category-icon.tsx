@@ -26,6 +26,7 @@ import {
   Stethoscope,
   Trophy,
 } from "lucide-react";
+import { CATEGORY_ICONS } from "@/modules/catalog";
 
 const ICONS: Record<string, LucideIcon> = {
   Atom,
@@ -46,7 +47,10 @@ const ICONS: Record<string, LucideIcon> = {
   Trophy,
 };
 
-export const ICON_NAMES = Object.keys(ICONS).sort();
+// The allowlist lives in the DOMAIN so validation can use it without importing
+// React. This import is the compile-time guard that the two lists stay equal:
+// CATEGORY_ICONS is a `as const` tuple, and the map above satisfies it.
+export const ICON_NAMES: readonly string[] = CATEGORY_ICONS;
 
 export function CategoryIcon({
   name,

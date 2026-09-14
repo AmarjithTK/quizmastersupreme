@@ -8,7 +8,20 @@ export {
   listRootCategories,
   getCategoryBySlug,
   listSetsForCategory,
+  listCategoriesForAdmin,
   groupSets,
   type CategoryCard,
   type SetCardData,
 } from "./service";
+
+export {
+  createCategory,
+  updateCategory,
+  setCategoryStatus,
+  reorderCategories,
+  archiveCategory,
+  type CreateCategoryInput,
+  type UpdateCategoryInput,
+} from "./admin";
+
+export { CATEGORY_ICONS, CATEGORY_ACCENTS, type CategoryIconName, type CategoryAccent } from "./content-options";
