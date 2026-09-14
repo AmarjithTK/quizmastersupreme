@@ -203,6 +203,26 @@ describe("start and resume", () => {
     expect(rows).toHaveLength(1);
   });
 
+  it("produces ONE attempt when two starts race (§18.2 #3)", async () => {
+    const u = user("race");
+    await finishAll(u);
+
+    // Fire both starts without awaiting in between.
+    const [first, second] = await Promise.all([
+      startOrResumeAttempt(u, SET),
+      startOrResumeAttempt(u, SET),
+    ]);
+
+    // Whoever lost the race is handed the winner's attempt.
+    expect(second.attempt.id).toBe(first.attempt.id);
+
+    const rows = await db()
+      .select()
+      .from(schema.quizAttempts)
+      .where(eq(schema.quizAttempts.userId, u));
+    expect(rows).toHaveLength(1);
+  });
+
   it("refuses to start a set that has no published questions", async () => {
     const u = user("empty");
     const now = Date.now();

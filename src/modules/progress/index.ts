@@ -153,6 +153,16 @@ export async function getSetStats(userId: string, setId: string) {
   return row ?? null;
 }
 
+export {
+  getDashboardStats,
+  getInProgressAttempts,
+  getUserHistory,
+  getWeakTopics,
+  type DashboardStats,
+  type AttemptListItem,
+  type WeakTopic,
+} from "./dashboard";
+
 /** Bulk version for screen 2: stats for every set in one category. */
 export async function getStatsForSets(userId: string, setIds: string[]) {
   if (setIds.length === 0) return new Map<string, typeof userSetStats.$inferSelect>();
