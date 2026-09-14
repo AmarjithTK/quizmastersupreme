@@ -80,7 +80,7 @@ export function SetQuestionsManager({
   const search = () =>
     run(async () => {
       setNotice(null);
-      const params = new URLSearchParams({ q: query.trim(), status: "published", pageSize: "25" });
+      const params = new URLSearchParams({ q: query.trim(), status: "active", pageSize: "25" });
       const data = await api<{ rows: BankRow[] }>(`/api/admin/questions?${params.toString()}`);
       setResults(data.rows);
       setSelected(new Set());
@@ -208,7 +208,7 @@ export function SetQuestionsManager({
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search published questions…"
+              placeholder="Search the question bank…"
               className={cn(field, "pl-8")}
             />
           </div>
@@ -238,7 +238,7 @@ export function SetQuestionsManager({
           </p>
         ) : results.length === 0 ? (
           <p className="rounded-xl border border-dashed border-slate-300 bg-white p-6 text-center text-sm text-slate-500">
-            Nothing matched. (Only PUBLISHED questions can be added to a set.)
+            Nothing matched. Try a different search — every active question is available.
           </p>
         ) : (
           <>

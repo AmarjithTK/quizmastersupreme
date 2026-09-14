@@ -1,12 +1,18 @@
 # Quiz Master Supreme
 
 A two-surface quiz platform: a user-facing card grid for browsing and taking quizzes
-with rich post-answer explanations, and an admin console for authoring content, running
-AI-assisted generation with a human review gate, and triaging duplicates.
+with rich post-answer explanations, and an admin console for authoring content and
+generating fresh questions with AI.
 
-**Read [`PLAN.md`](./PLAN.md) first.** Every schema change is tracked in
-[`MIGRATIONS.md`](./MIGRATIONS.md). It is the contract for this codebase — the frozen
-design constraints in §2 explain *why* the code is shaped the way it is.
+**The revamp (2026-09) simplified the content pipeline.** [`REVAMP-PLAN.md`](./REVAMP-PLAN.md)
+is the record: question statuses collapsed 8 → 3 (`active`/`rejected`/`archived`),
+playability is derived from set membership (no per-question publish step), generation
+asks for N and gets N (duplicates auto-filtered, shortfall backfilled), and the review
+queue, duplicate triage and vector-index machinery were removed. Where `PLAN.md`'s
+"frozen constraints" disagree with the code, the revamp wins.
+
+**Read [`PLAN.md`](./PLAN.md) for the original design.** Every schema change is tracked in
+[`MIGRATIONS.md`](./MIGRATIONS.md).
 
 ## Stack
 
@@ -17,28 +23,28 @@ design constraints in §2 explain *why* the code is shaped the way it is.
 | Database | **Cloudflare D1** (SQLite) — identical engine locally and in production |
 | ORM | Drizzle ORM + Drizzle Kit |
 | Search | D1 **FTS5** (virtual table + triggers) |
-| Dedupe | SimHash (L1) → FTS+Jaccard (L2) → embeddings (L3, Workers AI/Vectorize) |
-| AI generation | OpenRouter provider behind a transport-agnostic pipeline |
-| Tests | Vitest (unit) + real local D1 (integration) — **270 tests** |
+| Dedupe | Exact hash (L1) → FTS5 + Jaccard (L2), auto-filtering at write time |
+| AI generation | OpenRouter behind a transport-agnostic pipeline; count-sized output budget + backfill rounds |
+| Tests | Vitest (unit) + real local D1 (integration) — **259 tests** |
 
 ## Current status
 
-**M0–M13 implemented and verified locally.** See `PLAN.md` §0.1 for the as-built status
-and §20 for the roadmap. Highlights:
+**M0–M14 implemented, then simplified by the revamp — all verified locally.**
+See `PLAN.md` §0.1 for the as-built status and §20 for the roadmap. Highlights:
 
-- ✅ Full schema with migrations (18 tables), FTS5, CHECK / partial-unique constraints
+- ✅ Full schema with migrations (16 tables), FTS5, CHECK / partial-unique constraints
 - ✅ Google-only auth (OIDC + PKCE), D1 sessions, admin role gate
 - ✅ Admin: categories, quiz sets, questions, set membership — CRUD with validation + audit trail
-- ✅ The question funnel: validate → normalize → dedupe (3 layers) → insert on every write path
+- ✅ The question funnel: validate → normalize → dedupe (layers 1–2) → insert on every write path
 - ✅ Quiz runner (timed mock exams, resume, server-owned clock), results, history, dashboard, search
 - ✅ CSV import/export with dry run, bulk status changes
-- ✅ AI generation with review gate, coverage-aware prompts, acceptance reporting by prompt version
-- ✅ Dedupe sweep + triage UI; FTS search; embeddings with a disposable, backfillable index
+- ✅ AI generation: ask for N, get N — count-sized output budget, backfill rounds, duplicates
+  auto-filtered against the whole bank, coverage-aware prompts, one-click add-to-set
 - ✅ M14 hardening: rate limits, error boundaries, backup/restore (rehearsed by test), staging config,
   keyboard accessibility (skip link, focus management, live regions)
 
 **Never run on a deployed Worker.** Everything is verified against local D1 with `vinext dev`.
-The live OpenRouter, Workers AI/Vectorize, Google login and deploy round-trips still need real
+The live OpenRouter, Google login and deploy round-trips still need real
 credentials/resources — see "Deploying".
 
 ## Getting started
@@ -165,6 +171,12 @@ Non-obvious, and each one has already cost time once:
    (`node_modules/.vinext`-adjacent `.vinext/dev/lock.json`), delete the lock file
    before starting a new one.
 9. **The rate limiter resets on every Worker restart** — per-instance memory by design.
+10. **Never call `toLocaleString()` on a date inside a client component.** The server
+    (Workers = UTC) and the browser (local time) render different strings, so React
+    fails hydration. Use `<LocalTime value={ts} />` from `src/components/ui/LocalTime.tsx`
+    — it renders a UTC-pinned value until mounted, then switches to the viewer's
+    timezone. Server components (`app/account/*`, `app/admin/audit`) are unaffected
+    because their HTML is not hydrated, but they show UTC.
 
 ## Adding a category icon
 
@@ -195,8 +207,5 @@ Required before a production launch (each item is called out in PLAN.md §0.1 as
 1. **Google OAuth** — real client id/secret, authorised JS origins + redirect URIs
    (`/api/auth/google/callback`), `googleEnabled()` gate off by default.
 2. **OpenRouter key** — without it, generation jobs cannot run past `queued`.
-3. **Workers AI + Vectorize** — create the embedding model binding and the
-   `quizmaster-supreme-questions` index, then uncomment the bindings in `wrangler.jsonc`
-   and run the embeddings backfill.
-4. **R2 bucket** — `quizmaster-supreme-assets` (raw model responses).
+3. **R2 bucket** — `quizmaster-supreme-assets` (raw model responses).
 5. **Staging round** — deploy staging, run the E2E flow there, then production.

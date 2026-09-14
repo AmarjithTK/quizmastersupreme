@@ -1,14 +1,19 @@
 /**
- * Dedupe engine — the funnel from PLAN.md §13.
+ * Dedupe engine — the two-layer funnel (REVAMP-PLAN.md §3.3 / §5.2).
  *
- *   candidate → ① exact hash → ② FTS5 + Jaccard → ③ embeddings → human
+ *   candidate → ① exact hash → ② FTS5 + Jaccard → insert (or auto-filter)
  *
- * Layer 1 auto-rejects: after normalization a match is provable identity.
- * Layer 2 only FLAGS (§13.6) — "Who created Linux?" and "In what year was Linux
- * released?" are both good questions, and a similarity score cannot tell that
- * apart from a genuine duplicate. Layer 3 lands in M12 and is reported as
- * `degraded` until then, so callers are never told a question is clean when it
- * has only been checked twice.
+ * Layer 1 is provable identity after normalization. Layer 2 is a Jaccard score
+ * against the bank, split into two bands by `app_settings` thresholds:
+ *
+ *   ≥ jaccardReject  → "near_dup"      → AUTO-FILTERED (same question, reworded)
+ *   ≥ jaccardReview  → "possible_dup"  → shown as a badge, never blocks
+ *   below both       → "clean"         → kept
+ *
+ * The layers 3 (embeddings/vector index), the retroactive sweep and the
+ * duplicate_flags triage table were removed in the revamp: generation filters
+ * duplicates as they arrive, and the bank is protected by the same funnel on
+ * every write path (manual, CSV, AI).
  */
 
 import { inArray } from "drizzle-orm";
@@ -18,13 +23,12 @@ import { computeDedupeHashes } from "@/modules/questions/normalize";
 import { getDedupeThresholds, type DedupeThresholds } from "@/modules/settings";
 import { findExactDuplicate, type ExactMatch } from "./layer1-exact";
 import { classifyTextSimilarity, findTextDuplicates } from "./layer2-text";
-import { findSemanticMatches, type SemanticDedupe } from "./layer3-semantic";
 
 /** D1 caps bound parameters per statement at ~100; stay clearly under. */
 const MAX_BOUND_PARAMS = 90;
 
-export type DedupeStatus = "clean" | "exact_dup" | "near_dup" | "semantic_dup";
-export type DedupeLayer = "exact" | "text" | "semantic";
+export type DedupeStatus = "clean" | "exact_dup" | "near_dup" | "possible_dup";
+export type DedupeLayer = "exact" | "text";
 
 export type DedupeMatch = {
   questionId: string;
@@ -40,10 +44,8 @@ export type DedupeVerdict = {
   contentHash: string;
   bestMatch: DedupeMatch | null;
   allMatches: DedupeMatch[];
-  /** True ONLY for layer-1 exact matches. Never true for fuzzy matches. */
+  /** True for exact matches AND near-duplicates: the caller must not store it. */
   autoReject: boolean;
-  /** Layers not yet run. Empty once M12 lands. */
-  degraded: DedupeLayer[];
 };
 
 export type CandidateInput = {
@@ -55,13 +57,13 @@ export type CandidateInput = {
 export type CheckOptions = {
   /** Pass pre-read thresholds to avoid re-querying inside a batch. */
   thresholds?: DedupeThresholds;
-  /**
-   * Layer 3 dependencies. When absent, layer 3 is SKIPPED and reported as
-   * degraded rather than treated as "clean" (§13.8) — callers at the edge
-   * supply these when the bindings exist.
-   */
-  semantic?: SemanticDedupe | null;
+  excludeQuestionId?: string;
 };
+
+/** Should this candidate be dropped as a duplicate? The one rule callers need. */
+export function isAutoFiltered(verdict: DedupeVerdict): boolean {
+  return verdict.autoReject || verdict.status === "near_dup";
+}
 
 /** Layer 1 + layer 2 for a single candidate. */
 export async function checkCandidate(
@@ -78,13 +80,12 @@ export async function checkCandidate(
 /**
  * Batch funnel.
  *
- * Layer 1 runs as ONE query per chunk of hashes. Layer 2 still issues one FTS
- * query per surviving candidate (each needs its own MATCH string), which is why
- * batch sizes are capped upstream.
+ * Layer 1 runs as ONE query per chunk of hashes. Layer 2 issues one FTS query
+ * per surviving candidate (each needs its own MATCH string).
  */
 export async function checkCandidates(
   drafts: ReadonlyArray<{ stem: string; optionBodies: string[] }>,
-  options: CheckOptions & { excludeQuestionId?: string } = {},
+  options: CheckOptions = {},
 ): Promise<DedupeVerdict[]> {
   if (drafts.length === 0) return [];
 
@@ -126,7 +127,6 @@ export async function checkCandidates(
         bestMatch: match,
         allMatches: [match],
         autoReject: true,
-        degraded: [],
       });
       continue;
     }
@@ -152,7 +152,6 @@ export async function checkCandidates(
           layer: "text",
           normalizedHash: hash.normalizedHash,
           contentHash: hash.contentHash,
-          // FLAGGED, never auto-rejected: similarity is not identity (§13.6).
           bestMatch: {
             questionId: best.questionId,
             stem: best.stem,
@@ -165,65 +164,10 @@ export async function checkCandidates(
             similarity: m.similarity,
             layer: "text" as const,
           })),
-          autoReject: false,
-          degraded: ["semantic"],
+          // Only the reject band is a hard filter; the review band is a badge.
+          autoReject: status === "near_dup",
         });
         continue;
-      }
-    }
-
-    // ── Layer 3: embeddings + vector index ────────────────────────────────
-    // A failure here must NOT fail the write: degrade and carry on (§13.8).
-    if (options.semantic) {
-      try {
-        const semanticMatches = await findSemanticMatches({
-          stem: drafts[index]!.stem,
-          optionBodies: drafts[index]!.optionBodies,
-          semantic: options.semantic,
-          topK: 5,
-          threshold: thresholds.semanticReview * 0.9,
-          excludeQuestionId: options.excludeQuestionId,
-        });
-
-        const bestSemantic = semanticMatches[0];
-        if (bestSemantic && bestSemantic.score >= thresholds.semanticReview) {
-          verdicts.push({
-            status: "semantic_dup",
-            layer: "semantic",
-            normalizedHash: hash.normalizedHash,
-            contentHash: hash.contentHash,
-            bestMatch: {
-              questionId: bestSemantic.questionId,
-              stem: "",
-              similarity: bestSemantic.score,
-              layer: "semantic",
-            },
-            allMatches: semanticMatches.map((m) => ({
-              questionId: m.questionId,
-              stem: "",
-              similarity: m.score,
-              layer: "semantic" as const,
-            })),
-            // Again: evidence, never a verdict (§13.6).
-            autoReject: false,
-            degraded: [],
-          });
-          continue;
-        }
-
-        verdicts.push({
-          status: "clean",
-          layer: null,
-          normalizedHash: hash.normalizedHash,
-          contentHash: hash.contentHash,
-          bestMatch: null,
-          allMatches: [],
-          autoReject: false,
-          degraded: [],
-        });
-        continue;
-      } catch (error) {
-        console.error("Layer 3 unavailable; degrading to layers 1-2", error);
       }
     }
 
@@ -235,7 +179,6 @@ export async function checkCandidates(
       bestMatch: null,
       allMatches: [],
       autoReject: false,
-      degraded: ["semantic"],
     });
   }
 
@@ -244,16 +187,3 @@ export async function checkCandidates(
 
 export { findExactDuplicate, type ExactMatch };
 export { findTextDuplicates, jaccard, contentWords, classifyTextSimilarity } from "./layer2-text";
-export { resolveSemanticDedupe, semanticDedupeAvailable } from "./adapters";
-export { backfillEmbeddings, embeddingCoverage, type BackfillResult } from "./backfill";
-export { embeddingText, cosineSimilarity, featureHashEmbedder, workersAiEmbedder, type Embedder } from "./embeddings";
-export { memoryVectorIndex, vectorizeIndex, vectorIdFor, questionIdFromVectorId, type VectorIndex, type VectorMatch } from "./vector-index";
-export { findSemanticMatches, type SemanticDedupe, type SemanticMatch } from "./layer3-semantic";
-export {
-  sweepExistingQuestions,
-  listDuplicateFlags,
-  resolveDuplicateFlag,
-  openDuplicateCount,
-  type SweepResult,
-  type DuplicateFlagRow,
-} from "./sweep";

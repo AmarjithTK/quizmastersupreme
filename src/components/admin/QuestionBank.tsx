@@ -35,7 +35,7 @@ type QuestionRow = {
   createdAt: number;
 };
 
-const STATUSES = ["draft", "review", "approved", "published", "archived", "rejected"];
+const STATUSES = ["active", "rejected", "archived"];
 const DIFFICULTIES = ["easy", "medium", "hard", "expert"];
 const PAGE_SIZE = 20;
 
@@ -339,26 +339,18 @@ export function QuestionBank({ initial }: { initial: { rows: QuestionRow[]; tota
             <button
               type="button"
               disabled={busy}
-              onClick={() => bulkStatus("published")}
+              onClick={() => bulkStatus("active")}
               className="rounded-lg bg-emerald-500/90 px-3 py-1.5 text-xs font-semibold hover:bg-emerald-500 disabled:opacity-50"
             >
-              Publish
+              Restore to active
             </button>
             <button
               type="button"
               disabled={busy}
-              onClick={() => bulkStatus("review")}
+              onClick={() => bulkStatus("rejected")}
               className="rounded-lg bg-white/15 px-3 py-1.5 text-xs font-semibold hover:bg-white/25 disabled:opacity-50"
             >
-              Send to review
-            </button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => bulkStatus("draft")}
-              className="rounded-lg bg-white/15 px-3 py-1.5 text-xs font-semibold hover:bg-white/25 disabled:opacity-50"
-            >
-              Back to draft
+              Reject
             </button>
             <button
               type="button"
@@ -451,25 +443,24 @@ export function QuestionBank({ initial }: { initial: { rows: QuestionRow[]; tota
               </div>
 
               <div className="flex shrink-0 items-center gap-1">
-                {row.status !== "published" && (
+                {row.status !== "active" ? (
                   <button
                     type="button"
                     disabled={busy}
-                    onClick={() => setQuestionStatus(row, "published")}
+                    onClick={() => setQuestionStatus(row, "active")}
                     className="inline-flex items-center gap-1 rounded-lg bg-emerald-50 px-2.5 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50"
                   >
                     <CheckCircle2 className="size-3.5" />
-                    Publish
+                    Restore
                   </button>
-                )}
-                {row.status === "draft" && (
+                ) : (
                   <button
                     type="button"
                     disabled={busy}
-                    onClick={() => setQuestionStatus(row, "review")}
-                    className="rounded-lg bg-slate-100 px-2.5 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-200 disabled:opacity-50"
+                    onClick={() => setQuestionStatus(row, "rejected")}
+                    className="rounded-lg bg-rose-50 px-2.5 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-100 disabled:opacity-50"
                   >
-                    Send to review
+                    Reject
                   </button>
                 )}
                 <button
@@ -532,14 +523,9 @@ export function QuestionBank({ initial }: { initial: { rows: QuestionRow[]; tota
 
 function StatusBadge({ status }: { status: string }) {
   const styles: Record<string, string> = {
-    published: "bg-emerald-50 text-emerald-700",
-    approved: "bg-sky-50 text-sky-700",
-    review: "bg-amber-50 text-amber-700",
-    draft: "bg-slate-100 text-slate-600",
+    active: "bg-emerald-50 text-emerald-700",
     archived: "bg-slate-100 text-slate-400",
     rejected: "bg-red-50 text-red-700",
-    duplicate: "bg-red-50 text-red-700",
-    ai_draft: "bg-violet-50 text-violet-700",
   };
   return (
     <span

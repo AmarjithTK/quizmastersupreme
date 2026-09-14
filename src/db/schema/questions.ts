@@ -43,13 +43,11 @@ export const questions = sqliteTable(
     sourceUrl: text("source_url"),
     examBody: text("exam_body"),
     language: text("language").notNull().default("en"),
-    status: text("status").notNull().default("draft"),
+    status: text("status").notNull().default("active"),
 
     // ── Dedupe support (PLAN.md §13) ──────────────────────────────────────
     /** sha256 of the normalized stem. Layer 1. */
     normalizedHash: text("normalized_hash").notNull(),
-    /** 64-bit simhash as 16 hex chars. Layer 2 prefilter. */
-    simhash: text("simhash"),
     /** sha256 of normalized stem + sorted normalized options. Layer 1b. */
     contentHash: text("content_hash").notNull(),
 
@@ -70,7 +68,7 @@ export const questions = sqliteTable(
     index("ix_questions_generation_job").on(t.generationJobId),
     check(
       "ck_questions_status",
-      sql`${t.status} in ('ai_draft','draft','review','approved','published','rejected','duplicate','archived')`,
+      sql`${t.status} in ('active','rejected','archived')`,
     ),
     check("ck_questions_difficulty", sql`${t.difficulty} in ('easy','medium','hard','expert')`),
     check("ck_questions_origin", sql`${t.origin} in ('manual','ai','import','seed')`),

@@ -105,7 +105,7 @@ describe("importQuestions", () => {
   it("imports valid rows with their options", async () => {
     const csv = toCsv([HEADER, row("Bulk import created question one?"), row("Bulk import created question two?")]);
 
-    const report = await importQuestions(csv, ACTOR, { status: "draft" });
+    const report = await importQuestions(csv, ACTOR, { status: "active" });
 
     expect(report.total).toBe(2);
     expect(report.created).toBe(2);
@@ -243,7 +243,7 @@ describe("M9 exit test — 500 rows", () => {
       rows.push(row(`Bulk five hundred question number ${i}?`));
     }
 
-    const report = await importQuestions(toCsv(rows), ACTOR, { status: "draft" });
+    const report = await importQuestions(toCsv(rows), ACTOR, { status: "active" });
     const elapsed = Date.now() - started;
 
     expect(report.total).toBe(500);

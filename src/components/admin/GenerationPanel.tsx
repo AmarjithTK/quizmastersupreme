@@ -16,6 +16,7 @@ import { AlertCircle, Flag, Loader2, Play, Sparkles } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { BatchReview } from "@/components/admin/BatchReview";
+import { LocalTime } from "@/components/ui/LocalTime";
 
 type Job = {
   id: string;
@@ -37,9 +38,11 @@ type Job = {
 type Progress = {
   jobId: string;
   status: string;
+  requestedCount: number;
   producedCount: number;
   validCount: number;
   duplicateCount: number;
+  round: number;
   done: boolean;
   error: string | null;
 };
@@ -81,6 +84,12 @@ export function GenerationPanel({
 
   /** The job whose generated set is open in the batch view below. */
   const [batchJobId, setBatchJobId] = useState<string | null>(null);
+  /**
+   * Bumped after every generation round. The batch view reloads on change, so
+   * the questions appear as they arrive instead of only when the panel is
+   * remounted — no refresh, no "Review batch" click.
+   */
+  const [batchRefresh, setBatchRefresh] = useState(0);
 
   const [runningJobId, setRunningJobId] = useState<string | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
@@ -91,6 +100,17 @@ export function GenerationPanel({
     if (!res.ok) return;
     const body = (await res.json()) as { jobs: Job[] };
     setJobs(body.jobs);
+  }
+
+  /** Bring the generated-set review into view (it opens on its own). */
+  function scrollToBatch() {
+    // After paint, so the freshly rendered review exists to scroll to.
+    requestAnimationFrame(() => {
+      document.getElementById("batch-review")?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
   }
 
   async function createAndRun() {
@@ -126,6 +146,8 @@ export function GenerationPanel({
       setRunningJobId(jobId);
       setBatchJobId(jobId);
       await refetch();
+      // Open the review immediately, then keep it in view as it fills up.
+      scrollToBatch();
 
       // Advance until the job says it is done. Each call is one bounded step.
       for (let step = 0; step < 6; step++) {
@@ -136,6 +158,8 @@ export function GenerationPanel({
         }
         setProgress(body.progress);
         await refetch();
+        // Hand the fresh questions to the review screen right away.
+        setBatchRefresh((n) => n + 1);
         if (body.progress.done) break;
       }
 
@@ -143,6 +167,7 @@ export function GenerationPanel({
       setBrief("");
       setTarget("");
       setSources("");
+      scrollToBatch();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong");
     } finally {
@@ -238,7 +263,7 @@ export function GenerationPanel({
           <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
             How many
             <select value={count} onChange={(e) => setCount(e.target.value)} className={field}>
-              {[5, 10, 15, 20, 25].map((n) => (
+              {[10, 15, 20, 25, 50].map((n) => (
                 <option key={n} value={n}>
                   {n}
                 </option>
@@ -272,7 +297,8 @@ export function GenerationPanel({
             {running ? "Generating…" : "Generate"}
           </button>
           <span className="text-xs text-slate-500">
-            Small batches dedupe better and fail cheaper. Max 25 per job.
+            Ask for N, get N. Duplicates are detected against the whole bank (including
+            every Q Set) and shown as rejected by default — never hidden. Max 50 per job.
           </span>
         </div>
 
@@ -292,28 +318,36 @@ export function GenerationPanel({
         >
           {progress.done ? (
             <>
-              Job finished: <strong>{progress.producedCount}</strong> candidates produced,{" "}
-              <strong>{progress.validCount}</strong> valid,{" "}
-              <strong>{progress.duplicateCount}</strong> flagged as duplicates.
+              Asked <strong>{progress.requestedCount}</strong>, generated{" "}
+              <strong>{progress.producedCount}</strong> question
+              {progress.producedCount === 1 ? "" : "s"} in{" "}
+              <strong>{progress.round}</strong> round{progress.round === 1 ? "" : "s"} —{" "}
+              <strong>{progress.duplicateCount}</strong> flagged as duplicate
+              {progress.duplicateCount === 1 ? "" : "s"} (rejected by default, shown below).
               {progress.error && <> {progress.error}</>}{" "}
-              <a href="/admin/review" className="font-medium underline underline-offset-2">
-                Review them →
-              </a>
+              <span className="text-slate-500">The generated set is open below.</span>
             </>
           ) : (
-            <>Step complete — status is “{progress.status}”. Continuing…</>
+            <>
+              Round {progress.round} done — {progress.producedCount}/{progress.requestedCount}{" "}
+              generated so far. Topping up…
+            </>
           )}
         </div>
       )}
 
-      {/* The batch view: ALL questions from one generation together. */}
+      {/* The batch view: ALL questions from one generation together, opened
+          automatically and refreshed after every round. */}
       {batchJobId && (
-        <BatchReview
-          key={batchJobId}
-          jobId={batchJobId}
-          sets={sets}
-          categories={categories}
-        />
+        <div id="batch-review" className="scroll-mt-4">
+          <BatchReview
+            key={batchJobId}
+            jobId={batchJobId}
+            refreshKey={batchRefresh}
+            sets={sets}
+            categories={categories}
+          />
+        </div>
       )}
 
       <section className="flex flex-col gap-2">
@@ -368,12 +402,10 @@ export function GenerationPanel({
                     <code className="font-mono">[qms]</code>.
                   </span>
                 )}
-                <span className="ml-auto text-[11px] text-slate-400">
-                  {new Date(job.createdAt).toLocaleString("en-IN", {
-                    dateStyle: "short",
-                    timeStyle: "short",
-                  })}
-                </span>
+                <LocalTime
+                  value={job.createdAt}
+                  className="ml-auto text-[11px] text-slate-400"
+                />
                 <button
                   type="button"
                   onClick={() => setBatchJobId(job.id)}
@@ -404,6 +436,8 @@ export function GenerationPanel({
   async function createAndRunFrom(jobId: string) {
     setError(null);
     setRunningJobId(jobId);
+    setBatchJobId(jobId);
+    scrollToBatch();
     try {
       for (let step = 0; step < 6; step++) {
         const res = await fetch(`/api/admin/generation-jobs/${jobId}/step`, { method: "POST" });
@@ -413,8 +447,10 @@ export function GenerationPanel({
         }
         setProgress(body.progress);
         await refetch();
+        setBatchRefresh((n) => n + 1);
         if (body.progress.done) break;
       }
+      scrollToBatch();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong");
     } finally {

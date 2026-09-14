@@ -58,8 +58,19 @@ export class LlmError extends Error {
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
+/**
+ * Fallback output budget when a caller does not supply one. The pipeline always
+ * supplies a count-derived budget (see `budget.ts`), so this only covers direct
+ * or future callers.
+ */
+export const DEFAULT_MAX_TOKENS = 16_000;
+
 /** Rough per-million-token prices, used only to record an estimated cost. */
 const PRICE_PER_MILLION: Record<string, { input: number; output: number }> = {
+  // DeepSeek V4.1 Flash / V4 Flash (OpenRouter list price, Sep 2026).
+  "deepseek/deepseek-v4.1-flash": { input: 0.15, output: 0.6 },
+  "deepseek/deepseek-v4-flash-0731": { input: 0.15, output: 0.6 },
+  // Unknown model: deliberately high so cost is never silently under-reported.
   default: { input: 3, output: 15 },
 };
 
@@ -90,7 +101,7 @@ export function openRouterProvider(options: {
         url: OPENROUTER_URL,
         apiKey: maskSecret(options.apiKey),
         temperature: request.temperature ?? 0.7,
-        maxTokens: request.maxTokens ?? 8000,
+        maxTokens: request.maxTokens ?? DEFAULT_MAX_TOKENS,
         promptChars: request.system.length + request.user.length,
         providerOnly: request.providerOnly ?? [],
         providerOrder: request.providerOrder ?? [],
@@ -125,7 +136,7 @@ export function openRouterProvider(options: {
             { role: "user", content: request.user },
           ],
           temperature: request.temperature ?? 0.7,
-          max_tokens: request.maxTokens ?? 8000,
+          max_tokens: request.maxTokens ?? DEFAULT_MAX_TOKENS,
           // Ask for JSON where the model supports it; the parser copes when it
           // does not, so this is an optimisation rather than a requirement.
           response_format: { type: "json_object" },

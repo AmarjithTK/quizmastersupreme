@@ -128,7 +128,7 @@ beforeAll(async () => {
     "Quiz test question charlie?",
     "Quiz test question delta?",
   ].entries()) {
-    const { question } = await createQuestion(draft(stem), ACTOR, { status: "published" });
+    const { question } = await createQuestion(draft(stem), ACTOR, { status: "active" });
     questionIds.push(question.id);
     await db()
       .insert(schema.questionSetQuestions)
@@ -607,5 +607,116 @@ describe("state transitions", () => {
     // Resume must land on the first UNANSWERED question, not the last one seen.
     expect(state.resumeIndex).toBe(2);
     expect(state.answers.filter((a) => a.selectedOptionKey !== null)).toHaveLength(2);
+  });
+});
+
+// ── §0/G2 — playability comes from SET membership, not a per-question publish ──
+
+describe("playability is derived from the set", () => {
+  const PLAY_CAT = "cat__quiz_playability";
+  const PLAY_SET = "set__quiz_playability";
+
+  beforeAll(async () => {
+    const now = Date.now();
+    await db()
+      .insert(schema.categories)
+      .values({
+        id: PLAY_CAT,
+        slug: "quiz-playability",
+        title: "Quiz Playability",
+        sortOrder: 0,
+        status: "published",
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoNothing();
+    await db()
+      .insert(schema.quizSets)
+      .values({
+        id: PLAY_SET,
+        categoryId: PLAY_CAT,
+        slug: "quiz-playability-set",
+        title: "Quiz Playability Set",
+        mode: "practice",
+        difficulty: "easy",
+        shuffleQuestions: 0,
+        shuffleOptions: 0,
+        sortOrder: 0,
+        status: "published",
+        publishedAt: now,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoNothing();
+  });
+
+  afterAll(async () => {
+    await db().delete(schema.quizAttempts).where(eq(schema.quizAttempts.setId, PLAY_SET)).run();
+    await db().delete(schema.questionSetQuestions).where(eq(schema.questionSetQuestions.setId, PLAY_SET)).run();
+    await db().delete(schema.quizSets).where(eq(schema.quizSets.id, PLAY_SET)).run();
+    await db().delete(schema.categories).where(eq(schema.categories.id, PLAY_CAT)).run();
+  });
+
+  it("serves an ACTIVE question attached to a published set with no per-question publish", async () => {
+    const u = user("playable");
+    await finishAll(u);
+
+    const { question: active } = await createQuestion(
+      draft("Playability active question?", "A"),
+      ACTOR,
+      { status: "active" },
+    );
+    const { question: rejected } = await createQuestion(
+      draft("Playability rejected question?", "A"),
+      ACTOR,
+      { status: "rejected" },
+    );
+
+    const now = Date.now();
+    await db()
+      .insert(schema.questionSetQuestions)
+      .values([
+        { setId: PLAY_SET, questionId: active.id, sortOrder: 0, addedAt: now },
+        { setId: PLAY_SET, questionId: rejected.id, sortOrder: 1, addedAt: now },
+      ])
+      .onConflictDoNothing();
+
+    const { attempt } = await startOrResumeAttempt(u, PLAY_SET);
+    // The rejected question is excluded; the active one plays with no extra step.
+    expect(attempt.totalQuestions).toBe(1);
+    expect(JSON.parse(attempt.questionOrder)).toEqual([active.id]);
+  });
+
+  it("refuses to start when every attached question is rejected", async () => {
+    const u = user("allrejected");
+    await finishAll(u);
+
+    const { question } = await createQuestion(
+      draft("Playability all-rejected question?", "A"),
+      ACTOR,
+      { status: "rejected" },
+    );
+    const now = Date.now();
+    await db()
+      .insert(schema.questionSetQuestions)
+      .values({ setId: PLAY_SET, questionId: question.id, sortOrder: 5, addedAt: now })
+      .onConflictDoNothing();
+
+    // The one active question from the previous test is still attached, so this
+    // assertion is about the SEPARATE set state below.
+    await db()
+      .delete(schema.questionSetQuestions)
+      .where(and(eq(schema.questionSetQuestions.setId, PLAY_SET), eq(schema.questionSetQuestions.questionId, question.id)))
+      .run();
+    await db()
+      .delete(schema.questionSetQuestions)
+      .where(eq(schema.questionSetQuestions.setId, PLAY_SET))
+      .run();
+    await db()
+      .insert(schema.questionSetQuestions)
+      .values({ setId: PLAY_SET, questionId: question.id, sortOrder: 0, addedAt: now })
+      .onConflictDoNothing();
+
+    await expect(startOrResumeAttempt(u, PLAY_SET)).rejects.toMatchObject({ code: "CONFLICT" });
   });
 });

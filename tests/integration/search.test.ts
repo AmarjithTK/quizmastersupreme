@@ -108,7 +108,7 @@ beforeAll(async () => {
     "Multics introduced which file system concept?",
   ];
   for (const [index, stem] of published.entries()) {
-    const { question } = await createQuestion(draft(stem), ACTOR, { status: "published" });
+    const { question } = await createQuestion(draft(stem), ACTOR, { status: "active" });
     await db()
       .insert(schema.questionSetQuestions)
       .values({ setId: SET_PUBLISHED, questionId: question.id, sortOrder: index, addedAt: now })
@@ -118,7 +118,7 @@ beforeAll(async () => {
   const { question: draftQuestion } = await createQuestion(
     draft("Multics was abandoned in favour of what?"),
     ACTOR,
-    { status: "published" },
+    { status: "active" },
   );
   await db()
     .insert(schema.questionSetQuestions)

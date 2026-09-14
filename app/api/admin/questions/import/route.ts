@@ -1,7 +1,6 @@
 import { errorResponse, jsonResponse } from "@/lib/errors";
 import { requireAdmin } from "@/modules/auth";
 import { importQuestions } from "@/modules/questions";
-import { resolveSemanticDedupe } from "@/modules/dedupe";
 import type { QuestionStatus } from "@/db/schema";
 
 /**
@@ -26,7 +25,7 @@ export async function POST(request: Request) {
 
     const contentType = request.headers.get("content-type") ?? "";
     let csv = "";
-    let status: QuestionStatus = "draft";
+    let status: QuestionStatus = "active";
     let dryRun = false;
 
     if (contentType.includes("application/json")) {
@@ -59,23 +58,19 @@ export async function POST(request: Request) {
       );
     }
 
-    if (!["draft", "published", "review", "approved"].includes(status)) {
+    if (!["active", "rejected", "archived"].includes(status)) {
       return jsonResponse(
         {
           error: {
             code: "VALIDATION",
-            message: "Imported questions may only be draft, review, approved or published.",
+            message: "Imported questions may only be active, rejected or archived.",
           },
         },
         { status: 422 },
       );
     }
 
-    const report = await importQuestions(csv, actor.id, {
-      status,
-      dryRun,
-      semantic: resolveSemanticDedupe(),
-    });
+    const report = await importQuestions(csv, actor.id, { status, dryRun });
     return jsonResponse({ report }, { status: 200 });
   } catch (error) {
     return errorResponse(error);

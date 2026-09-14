@@ -6,6 +6,30 @@
 > **Deployment target:** Cloudflare Workers + D1
 > **This document is the contract.** If a later idea conflicts with a rule in §2, the rule wins until the rule is explicitly amended here.
 
+> ---
+> ## ⚠ REVAMP — 2026-09 (supersedes parts of this document)
+>
+> The content pipeline was simplified after this plan was written. Where this
+> document disagrees with the code, **[`REVAMP-PLAN.md`](./REVAMP-PLAN.md) wins**.
+> In brief:
+>
+> - **Question statuses: 8 → 3** — `active` / `rejected` / `archived` (§2.2, §6.2).
+> - **Playability comes from the SET.** A question is playable when it is `active`
+>   and attached to a *published* set. There is **no per-question publish step**.
+> - **"Ask for N, get N."** Generation sizes its output request from the count and
+>   the model's real ceiling (DeepSeek V4.1 Flash ≈125k output, not 8000), filters
+>   duplicates against the whole bank as they arrive, and runs **backfill rounds**
+>   for the shortfall (§12).
+> - **Dedupe is two layers** (exact hash → FTS5 + Jaccard), applied at write time and
+>   **auto-filtering** at the reject threshold. The simhash prefilter, the
+>   embeddings/Vectorize layer, the retroactive sweep, the triage UI, the review
+>   queue and `duplicate_flags` were removed (§13, §9.6, §9.7).
+> - **Commit is one action**: the kept batch is inserted as `active` questions and
+>   attached to a Q Set, playable as soon as the set is published.
+>
+> Sections marked "(REVISED)" below have been amended; §12.4 (coverage digest),
+> §12.5 (validation contract), §12.7 (prompt versioning), §13.2 and §13.4 still hold.
+
 ---
 
 ## Table of Contents
@@ -145,7 +169,7 @@ SCREEN 3  →  Quiz Runner: the actual activity (NOT a navigation level)
 
 1. **Resume is a first-class feature, not a nice-to-have.** Answering 25 of 50 questions then closing the browser loses nothing. *(§11.4)*
 2. **The backstory.** Every question carries a rich explanation surface — not a one-line "because it's B". *(§11.7)*
-3. **The AI never publishes.** Generated content lands in a review queue, always. *(§2.2)*
+3. **AI never writes to the bank on its own.** Generation fills a working set that a human reviews and commits in one action; the committed questions are `active` and playable as soon as their set is published. *(§2.2, revised)*
 4. **Duplicate suppression is a three-layer funnel**, not a vibe. *(§13)*
 
 ### 1.5 Explicit non-goals for v0.1
@@ -181,13 +205,30 @@ CATEGORY  (depth 1 — appears on the home grid)
 
 > **Note on "Tech Quiz → Kerala State → Mock Set 1":** this is **not** three levels. "Kerala State Mock Set 1" is the *title of a set*, not a container. Sets are flat siblings inside a category, distinguished by naming and `sort_order`. Grouping *within* the set grid is achieved with a lightweight `group_label` display field (e.g. `"Kerala State"`, `"Previous Year"`) that only affects visual sectioning — it has no schema depth and creates no route.
 
-### 2.2 Constraint: AI output is never published content
+### 2.2 Constraint: playability is derived from SET membership (REVISED)
 
 ```
-AI_GENERATED → DRAFT → REVIEW_REQUIRED → APPROVED → PUBLISHED
+AI GENERATED → WORKING SET → human rejects what they dislike → COMMIT
+                                                              ↓
+                        questions.status = 'active'  +  attached to a Q Set
+                                                              ↓
+                              playable as soon as THAT SET is published
 ```
 
-Every AI-produced question lands in `ai_candidates` with `review_status = 'pending'`. A human action is the **only** path from candidate to `questions.status = 'published'`. There is no "auto-approve" flag, no `--yes` mode, no trusted-model bypass. If a future requirement wants bulk approval, it still requires a human click; bulk approval of a *filtered* list is acceptable, a background job that publishes is not.
+**The rule:** a question is playable **iff** `questions.status = 'active'` **and** it
+is attached to a published `quiz_sets` row. Nothing else gates it.
+
+**What was removed and why:** the original design chained three independent publish
+gates (category → set → per-question) plus a review queue, so adding generated
+questions to a published set still produced "this set has no published questions yet".
+The per-question publish state and the candidate review state machine were deleted in
+the revamp (migration `0005`). Generation output is still never *silently* published:
+it sits in a per-job working set (`ai_candidates`), and only an explicit
+`commitJobToSet()` action inserts it — through `createQuestion()`, the same validation
+and dedupe funnel as every other write path.
+
+**Statuses:** `active` (in the bank), `rejected` (excluded; includes what used to be
+`duplicate`), `archived` (soft delete).
 
 ### 2.3 Constraint: D1 is the source of truth; Vectorize is a disposable index
 
@@ -585,6 +626,12 @@ quizmaster-supreme/
 ```
 
 ### 6.2 Schema DDL
+
+> **REVISED by the revamp — `migrations/0005_revamp_pipeline.sql` is the current truth.**
+> `questions` now has 3 statuses (`active`/`rejected`/`archived`) and no `simhash`;
+> `ai_candidates` is a plain working set with a `rejected` 0/1 flag; `duplicate_flags`
+> and `question_embeddings` are dropped; `ai_generation_jobs` gained `backfill_round`
+> and `duplicate_skipped`. The DDL below is the pre-revamp draft kept for context.
 
 Migration `0000_init.sql`. Timestamps are **Unix epoch milliseconds as INTEGER** (D1/SQLite has no native datetime; integers sort and index correctly and avoid timezone ambiguity). Booleans are `INTEGER` 0/1.
 
@@ -1299,57 +1346,46 @@ The backstory field gets a live preview rendered through the **same** `Backstory
 
 Table with: full-text search, filters (status, category, set, topic, difficulty, origin, year, has-backstory), bulk select, bulk status change, CSV export. Pagination via keyset, not `OFFSET`.
 
-### 9.5 Generate
+### 9.5 Generate (REVISED)
+
+One screen: ask for N questions, review the fresh batch, add it to a Q Set.
 
 ```
-Category   [ Tech Quiz ▾ ]
-Set        [ Kerala State Mock Set 6 ▾ ]  (or "create new")
 Topic      [ Operating Systems        ]
-Subtopics  [ process scheduling, deadlock, paging ]
-Brief      [ Focus on Kerala PSC style. Avoid trivia about  ]
-           [ version numbers. Include one question on        ]
-           [ Semaphore vs Mutex.                             ]
-Count      [ 25 ]     Difficulty [ Medium-Hard ▾ ]
-Include full existing questions in prompt?  [ ] (costs more tokens)
-Model      [ anthropic/claude-sonnet-4.5 ▾ ]
+Target     [ Kerala PSC exam           ]   (optional)
+Sources    [ authoritative refs        ]   (optional)
+Brief      [ Focus on Kerala PSC style. Include one question on Mutex. ]
+Count      [ 10 | 15 | 20 | 25 | 50 ]
+Difficulty [ medium ▾ ]     Model [ deepseek/deepseek-v4.1-flash ]
 
-Existing coverage: 412 questions on this topic.
-Digest preview: 2,100 chars · ~520 tokens  [ view ]
-
-                              [ Generate 25 questions ]
+                              [ Generate ]
 ```
 
-While running, the page shows live job status (queued → running → parsing → deduping → done) with a progress bar, then links to the review queue.
+The job runs in bounded rounds driven by `/step`. Each round asks for the shortfall,
+auto-filters duplicates against the whole bank, and stores the survivors. A short
+round leaves the job `running`; the next call tops it up (up to 3 rounds). The progress
+line reports the truth: *asked 10 · delivered 10 fresh · 2 duplicates skipped · 1 round*.
 
-### 9.6 Review queue
+The finished batch opens below the form (see §9.6).
 
-Card-per-candidate, keyboard-driven (`J`/`K` to move, `A` approve, `R` reject, `E` edit-then-approve):
+### 9.6 Batch review (REVISED — was "Review queue")
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│  ⚠ Possible duplicate — 94% semantic match                          │
-│                                                                      │
-│  NEW                                                                 │
-│  Who originally developed the Linux kernel?                          │
-│  A. Linus Torvalds  B. Richard Stallman  C. Ken Thompson  D. …       │
-│                                                                      │
-│  EXISTING #1842 (published)                                          │
-│  Who created Linux?                                                  │
-│  A. Linus Torvalds  B. …                                             │
-│                                                                      │
-│  [ Keep Anyway ]   [ Reject Duplicate ]   [ Merge → keep existing ]  │
-├──────────────────────────────────────────────────────────────────────┤
-│  Backstory preview …                                                 │
-│                                                                      │
-│  [ Approve ]  [ Approve & Edit ]  [ Reject ]  [ Defer ]              │
-└──────────────────────────────────────────────────────────────────────┘
-```
+Every question from the job in one window: stem, options (correct one highlighted),
+difficulty, and an expandable explanation + backstory. One decision per question —
+**Reject** or **Keep** (kept is the default). Rejected rows are skipped at commit.
 
-### 9.7 Duplicates
+No duplicate triage, no approve/merge/defer state machine: duplicates were already
+filtered when the batch was generated.
 
-Two tabs:
-- **Candidates** — AI candidates flagged as duplicates awaiting a decision.
-- **Bank sweep** — existing published questions flagged against each other by `sweepExistingQuestions()`. Batch actions: confirm duplicate (archive one), dismiss, merge.
+### 9.7 Commit to a Q Set (REVISED — was "Duplicates")
+
+One action at the bottom of the batch: **Add to an existing Q Set** or **Create a new
+Q Set and add**. Committing inserts the kept questions as `active` questions and
+attaches them in batch order. If the set is (or becomes) published, the quiz is live
+immediately.
+
+The `duplicate_flags` triage screen and the bank-sweep tab were removed — dedupe runs
+at write time (§13), not as a retroactive cleanup job.
 
 ### 9.8 The "no third level" rule in the admin UI
 
@@ -1555,50 +1591,52 @@ The renderer is used in three places: the quiz runner, the admin editor preview,
 
 ## 12. AI generation pipeline
 
-### 12.1 Why async (and why not a page request)
+### 12.1 Transport: bounded rounds, not one giant request (REVISED)
 
-A 25-question generation with detailed backstories is a 60–300 second LLM call producing 15–40 KB of text. Doing that inside an HTTP request would mean: a hung browser, a Worker wall-clock limit, a lost response on network blip, and no retry. So:
+Generation is advanced by `POST /api/admin/generation-jobs/:id/step`. **Each call
+performs at most one model request**, so no single HTTP request owns a whole job, a
+closed browser loses nothing (the job row and working set are in D1, the raw model
+response is in R2), and a retry cannot double-generate. `runGenerationStep()` is a
+plain async function; a Cloudflare Queue consumer or Workflow would call exactly this.
 
-```
-POST  /api/admin/generation-jobs   → validate → INSERT job(queued) → enqueue → 202 {jobId}
-Queue consumer                     → the actual work (§12.3)
-GET   /api/admin/generation-jobs/:id → poll for progress
-```
-
-If generation ever needs multiple retrying steps (generate → validate → repair invalid → embed), promote the consumer body into a **Cloudflare Workflow**. The job table already models the state, so that's a contained change.
-
-### 12.2 Job lifecycle
+### 12.2 Job lifecycle (REVISED)
 
 ```
-queued ──> running ──┬──> succeeded          (all candidates stored)
-                     ├──> partial            (some stored, some invalid)
-                     ├──> failed             (provider error, parse failure, timeout)
-                     └──> cancelled          (admin action)
+queued ──> round 1 ──┬──> succeeded   (produced >= requested)
+                     ├──> running      (short: a later call asks for the remainder)
+                     └──> partial      (round cap reached, some produced)
+                     └──> failed       (provider error, unparseable response, no candidates)
 ```
 
-Each transition writes `audit_log` and updates counters. `raw_response_key` points at the R2 object holding the untouched model output — non-negotiable for debugging a bad batch three weeks later.
+`backfill_round` records how many model calls a job has made (max 3).
 
-### 12.3 Consumer steps
+### 12.3 The round (REVISED)
 
 ```
- 1. Load job. If status != 'queued' → ack and exit (idempotent re-delivery).
- 2. Mark running, started_at.
- 3. Build the coverage digest (§12.4). Persist it on the job row.
- 4. Render the prompt (§25.1) with digest + brief + constraints.
- 5. Call OpenRouter (streaming; accumulate). Record token usage + cost.
- 6. Store the raw payload to R2: jobs/{jobId}/response.json
- 7. Parse → JSON repair pass if needed → Zod validate each candidate.
-      invalid → INSERT ai_candidates(validation_status='invalid', errors)
- 8. For each valid candidate:
-      normalize → layer-1 hash check
-      → layer-2 FTS5 candidate search  (§13.4)
-      → layer-3 embedding + Vectorize (§13.5)   [M12+]
-      → INSERT ai_candidates with dedupe_status
- 9. Update job counters + terminal status.
-10. ack.
+1. Load job; a terminal job is returned unchanged (idempotent).
+2. remaining = requested_count − produced_count. If 0, finish as succeeded.
+3. Build the digest: bank coverage (§12.4) + the stems ALREADY produced by this
+   batch, so a backfill round cannot re-ask them.
+4. max_tokens = outputBudgetFor(remaining, model)
+     = clamp(ceil(remaining × 850 × 1.15), 8_000, model output ceiling)
+   DeepSeek V4.x = 96k ceiling → a 50-question batch fits in ONE call.
+   Llama 3.3 (4k) / Haiku (8k) truncate; the backfill rounds finish the job.
+5. Call the model; archive the raw response to R2 (`ai-jobs/<id>/response-r<N>.txt`).
+6. Parse with the repair chain, validate each candidate individually.
+7. Dedupe each valid candidate against the WHOLE bank (layers 1–2):
+     exact match OR Jaccard >= dedupe.jaccard_reject  → DROP, count as duplicate
+     Jaccard >= dedupe.jaccard_review                 → keep, badge as possible dup
+   Also drop anything whose normalized hash this batch already produced.
+8. Store the survivors in `ai_candidates` (batch order preserved).
+9. produced_count += stored; duplicate_count += dropped; backfill_round = round.
+   produced >= requested → succeeded; else round < 3 → running; else partial/failed.
+10. Audit the round. The admin UI calls /step again until done.
 ```
 
-**Idempotency:** step 1 makes redelivery safe. Additionally, `ai_candidates` inserts are guarded by `(job_id, normalized_hash)` uniqueness in practice via a pre-insert check, so a retry after a partial failure doesn't double-insert.
+**Why the cap is now honest:** the old pipeline asked for every batch with
+`max_tokens: 8000` regardless of the model, so a 10-question request was truncated
+mid-array and "10" became "3". The budget is now derived from the count and the real
+model ceiling, and anything the model still cannot fit is topped up by later rounds.
 
 ### 12.4 Solving the stateless-API repetition problem
 
@@ -1691,14 +1729,20 @@ const GenerationResponse = z.object({
 
 Anything that fails lands in the candidate table **with its errors visible**, marked `invalid`. Admins can still see and salvage them. Silent dropping is forbidden — a systematically broken prompt should be visible, not invisible.
 
-### 12.6 Cost controls
+### 12.6 Cost controls (REVISED)
 
-- `requested_count` capped per job (default 25, hard max 50). Smaller batches dedupe better and fail cheaper.
-- Per-admin daily token budget in `app_settings`.
-- Model allowlist in `app_settings` — no free-text model field.
-- `cost_usd` recorded per job; a dashboard total.
-- `include_examples` (sending full existing questions instead of a digest) is off by default and labelled with its cost.
-- Dry-run: `POST .../preview-digest` returns the exact digest and estimated token count without calling the LLM. Admins should always be able to see what they're paying for.
+- `requested_count` cap per job: **50** (UI offers 10/15/20/25/50).
+- Output budget is count-sized, so cost tracks the ask: on DeepSeek V4.1 Flash
+  ($0.15 / $0.60 per 1M) a 50-question batch is ~$0.03. `cost_usd` is recorded per
+  job and summed per prompt version.
+- Per-admin daily token budget in `app_settings`; model allowlist in `app_settings`
+  (the model field is a preset list, not free text).
+- Per-job **round cap of 3** bounds the spend on a saturated topic; when the bank
+  already covers a topic the job stops and says so rather than burning tokens.
+- `include_examples` (send full existing questions instead of a digest) is off by
+  default and labelled with its cost.
+- Dry-run: `POST .../preview-digest` returns the exact digest and estimated token
+  count without calling the LLM.
 
 ### 12.7 Prompt versioning
 
@@ -1708,21 +1752,25 @@ Prompt templates are code (`modules/ai/prompts/*`), and every job stores `prompt
 
 ## 13. Duplicate detection engine
 
-### 13.1 Design principle
-
-A funnel, cheapest-first. Most duplicates die at layer 1 for free; only survivors reach an embedding call. **And the final decision is always human for anything ambiguous** — the engine flags, it does not silently delete.
+### 13.1 Design principle (REVISED)
 
 ```
-candidate
-   │
-   ├─ LAYER 1  exact / normalized hash ──────────> DUPLICATE (auto-reject, free, instant)
-   │
-   ├─ LAYER 2  FTS5 + simhash near-match ────────> likely duplicate (auto-flag, ~free)
-   │
-   ├─ LAYER 3  embedding cosine via Vectorize ───> possible duplicate (flag with score)
-   │
-   └──────────────────────────────────────────────> CLEAN → review queue
+candidate → ① exact hash (auto-drop) → ② FTS5 + Jaccard (auto-drop at the reject
+            band, badge at the review band) → insert
 ```
+
+Two layers, both cheap, both run at write time on every path (manual, CSV, AI). The
+funnel protects the bank; there is no separate triage workflow.
+
+**What was removed:** the simhash prefilter (FTS5 already narrows candidates), the
+embeddings/Vectorize layer 3 (never wired — the bindings were commented out in
+`wrangler.jsonc`), and the retroactive sweep + `duplicate_flags` triage UI. If
+semantic dedupe is ever wanted again the files are in git history; it is a functional
+removal, not a data loss.
+
+**The auto-filter rule:** `verdict.autoReject || verdict.status === "near_dup"` — the
+one call site is `isAutoFiltered()` in `modules/dedupe`. The reject threshold lives in
+`app_settings` (`dedupe.jaccard_reject`), so tuning needs no deploy.
 
 ### 13.2 Layer 1 — normalization and exact matching
 
@@ -1750,52 +1798,11 @@ Applied to stem, and to the sorted option bodies, producing two hashes:
 
 Layer 1 must run **before** any LLM call and before any DB insert. It is the cheapest and catches the most common failure (a model regenerating an obvious question verbatim).
 
-### 13.3 Layer 2a — simhash prefilter
+### 13.3 Layer 2a — simhash prefilter — **RETIRED**
 
-A 64-bit SimHash over **word unigrams** of the normalized stem, stored as 16 hex chars.
-
-> **Revised during M0, based on measurement.** The original design used token
-> 3-grams with a Hamming threshold of ≤ 6. That was wrong for this corpus.
-> Question stems are short (5–15 tokens), so a 3-gram signature has very few
-> grams and ONE changed word perturbs most of them: a mere spelling variant
-> (`organisation` → `organization`) measured **23 bits** apart — indistinguishable
-> from an unrelated question. Unigrams keep one changed word to one changed
-> feature.
-
-Measured Hamming distances on real stems from `seed/questions.json`:
-
-| Pair | Distance |
-|---|---|
-| identical / case + punctuation only | 0 |
-| one-word spelling variant | 10 |
-| paraphrase ("Who created Linux?" vs "Who was the original developer of the Linux kernel?") | 12 |
-| same topic, different fact | 24 |
-| different topic | 28 |
-| unrelated | 36 |
-
-**Threshold: ≤ 16** (`SIMHASH_NEAR_DUPLICATE_MAX_DISTANCE`), which sits in the gap
-with margin on both sides. These are prefilter bands only — the thresholds that
-actually drive admin review decisions live in `app_settings` (§13.4) so they can be
-tuned without a deploy.
-
-```ts
-// modules/dedupe/simhash.ts
-export function simhash64(text: string): bigint {
-  const votes = new Array<number>(64).fill(0);
-  for (const gram of shingles(normalizeStem(text), 1)) {   // WORD UNIGRAMS
-    const h = fnv1a64(gram);
-    for (let i = 0; i < 64; i++) {
-      const bit = (h >> BigInt(i)) & 1n;
-      votes[i] = (votes[i] ?? 0) + (bit === 1n ? 1 : -1);
-    }
-  }
-  let out = 0n;
-  for (let i = 0; i < 64; i++) if ((votes[i] ?? 0) > 0) out |= 1n << BigInt(i);
-  return out;
-}
-```
-
-Cheap, pure TypeScript, no dependencies. Since every question stores its simhash, a scan is a linear pass with a popcount — acceptable for tens of thousands of rows inside a queue consumer, and unnecessary in the hot path. It is a **coarse prefilter**: FTS5 + Jaccard does the real work at layer 2, and embeddings do the semantic work at layer 3.
+The `questions.simhash` column was dropped in migration `0005`. FTS5 + Jaccard (§13.4)
+already narrows candidates cheaply, so a second coarse prefilter bought nothing and
+cost a column on every row.
 
 ### 13.4 Layer 2b — FTS5 candidate retrieval
 
@@ -1822,90 +1829,47 @@ jaccard = |A ∩ B| / |A ∪ B|     over content-word sets
 
 Thresholds live in `app_settings` (`dedupe.jaccard_reject`, `dedupe.jaccard_review`) so they're tunable without a deploy.
 
-### 13.5 Layer 3 — semantic similarity
+### 13.5 Layer 3 — semantic similarity — **RETIRED**
 
-Only runs on candidates that survived layers 1–2 and are not already layer-2 duplicates.
+The embeddings + Vectorize layer was never enabled (the bindings were commented out in
+`wrangler.jsonc`), so in practice it only ever appeared in tests. It was removed along
+with `question_embeddings` in migration `0005`. Layers 1–2 are the whole live funnel.
 
-```ts
-// modules/dedupe/embeddings.ts
-const EMBED_MODEL = '@cf/baai/bge-m3';   // 1024-dim
-
-type EmbedText = { questionId: string; text: string };   // stem + options, not backstory
-
-async function embed(texts: string[]): Promise<number[][]> {
-  const res = await bindings().AI.run(EMBED_MODEL, { text: texts });
-  return res.data;
-}
-```
-
-Vector payload — **only an id**, per §2.3:
-
-```ts
-{
-  id: `q_${questionId}`,
-  values: embedding,
-  metadata: { questionId, status, topic, difficulty }
-}
-```
-
-Query for a candidate:
-
-```ts
-const matches = await bindings().VECTORIZE.query(embedding, {
-  topK: 5,
-  returnMetadata: 'all',
-});
-```
-
-Similarity thresholds (cosine):
-- `≥ 0.95` → semantic duplicate, auto-flag as duplicate
-- `0.85 – 0.95` → flag for human review with the score shown
-- `< 0.85` → clean
-
-**This is what catches the user's exact example:**
-
-| Question | Wording |
-|---|---|
-| Existing | Who created Linux? |
-| Candidate A | Who was the original developer of the Linux kernel? |
-| Candidate B | Linux was initially developed by whom? |
-
-Layers 1 and 2 miss all of these. Layer 3 clusters them tightly.
-
-**Embedding text choice matters:** embed `stem + " " + option bodies joined`. Do **not** embed the backstory — it dilutes the topical signal and makes unrelated questions with similar prose look alike. Store `content_hash` in `question_embeddings` so a re-embed happens only when the embedded text actually changes.
-
-### 13.6 Verdict type
+### 13.6 Verdict type (REVISED)
 
 ```ts
 type DedupeVerdict = {
-  status: 'clean' | 'exact_dup' | 'near_dup' | 'semantic_dup';
-  layer: 'exact' | 'text' | 'semantic';
-  bestMatch?: {
-    questionId: string;
-    stem: string;
-    similarity: number;
-    status: string;
-  };
-  allMatches: Array<{ questionId: string; similarity: number; layer: string }>;
-  autoReject: boolean;   // true only for layer-1 exact matches
+  status: 'clean' | 'exact_dup' | 'near_dup' | 'possible_dup';
+  layer: 'exact' | 'text' | null;
+  normalizedHash: string;
+  contentHash: string;
+  bestMatch: { questionId: string; stem: string; similarity: number; layer: 'exact' | 'text' } | null;
+  allMatches: Array<{ questionId: string; stem: string; similarity: number; layer: 'exact' | 'text' }>;
+  autoReject: boolean;   // exact matches AND the >= reject band
 };
 ```
 
 **Policy:**
-- `autoReject: true` only for layer-1 exact matches. These are provably identical after normalization; no human judgment is required.
-- Everything else is **flagged, never auto-deleted**, and surfaces in the admin triage UI (§9.7) with the matched question shown side by side. The human picks Keep / Reject / Merge.
+- `exact_dup` (layer 1) and `near_dup` (Jaccard ≥ `dedupe.jaccard_reject`) are
+  **auto-filtered** — generation drops them and asks for a replacement instead of
+  showing them to a human.
+- `possible_dup` (Jaccard ≥ `dedupe.jaccard_review`) is a **badge only**; it never
+  blocks. "Who created Linux?" and "In what year was Linux first released?" are both
+  good questions and both must survive.
 
-This is deliberately more conservative than the original "reject and only insert the remaining questions" idea. Silently discarding a question that is merely *similar* would throw away genuinely distinct content — "Who created Linux?" and "In what year was the Linux kernel first released?" are both good questions. Flag, don't destroy.
+### 13.7 Retroactive sweep — **RETIRED**
 
-### 13.7 Retroactive sweep
+`sweepExistingQuestions()` and the `duplicate_flags` table were removed in migration
+`0005`. Dedupe is a write-time funnel; the admin duplicate-triage screen is gone. If a
+threshold change ever needs a cleanup pass over old rows, that is a one-off script, not
+product surface.
 
-Dedupe isn't only a generation-time concern. `sweepExistingQuestions()` runs over the published bank, recomputing layer-2 and layer-3 flags, and writes `duplicate_flags`. Triggered manually from `/admin/duplicates` or on a schedule. It's also the repair path after a threshold change.
+### 13.8 Failure behavior (REVISED)
 
-### 13.8 Failure behavior
-
-If the embedding provider or Vectorize is unavailable, layer 3 is **skipped**, not failed. The candidate is stored with `dedupe_status='clean'` but tagged `dedupe_detail = {"degraded": "layer3_unavailable"}`, and a background backfill re-checks it later. AI generation must not be blocked by an indexing outage.
-
----
+The funnel is D1-only, so there is no degraded mode to report: if the database answers,
+dedupe ran. Layer-2 FTS failures surface as an error rather than a silent "clean"
+verdict — the old `degraded: ['semantic']` bookkeeping existed only because layer 3
+needed an external index, and that layer is gone.
 
 ## 14. Local development
 

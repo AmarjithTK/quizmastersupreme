@@ -4,7 +4,7 @@ Single source of truth for every schema change applied to the D1 database.
 If a migration is not listed here, treat it as not real. **Migrations are
 append-only: never edit an applied migration — add a new one.**
 
-Current tip: **`0004_ai_job_inputs`**
+Current tip: **`0005_revamp_pipeline`**
 
 ## How migrations work here
 
@@ -28,18 +28,19 @@ Current tip: **`0004_ai_job_inputs`**
 | 0002 | `0002_tan_satana.sql` | **Hand-written** | Google OIDC: new `oauth_states` table (PKCE + state params), Rebuilds `users` with Google columns (`google_sub`, `google_email`, `google_name`, `google_avatar_url`, …), drops the old users table under `PRAGMA foreign_keys=OFF`, adds `sessions.last_seen_at` / `ip_hash`/`user_agent` and indexes. | M1 |
 | 0003 | `0003_provider_routing.sql` | Hand-written (tiny) | Adds `provider_only` and `provider_order` (TEXT, JSON arrays of OpenRouter provider slugs) to `ai_generation_jobs` — the `provider.only` / `provider.order` cost-control routing. | M14+ |
 | 0004 | `0004_ai_job_inputs.sql` | Hand-written (tiny) | Adds `target`, `sources` (generation input context) and `committed_set_id`, `committed_at` (batch-commit marker) to `ai_generation_jobs`. | M14+ |
+| 0005 | `0005_revamp_pipeline.sql` | **Hand-written** | The simplification revamp (REVAMP-PLAN.md). (1) Rebuilds `questions` under `PRAGMA foreign_keys=OFF`: `status` collapses 8 values → `active`/`rejected`/`archived` (`ai_draft,draft,review,approved,published` → `active`; `duplicate` → `rejected`) and `simhash` is dropped; indexes + FTS triggers recreated and `questions_fts` rebuilt. (2) Rebuilds `ai_candidates` as a plain working set (drops validation/dedupe/review state machines + promote pointer; adds `rejected` 0/1). (3) Drops `duplicate_flags` and `question_embeddings`. (4) Adds `backfill_round` + `duplicate_skipped` to `ai_generation_jobs`. | Revamp |
 
 ## Adding a new migration (the rules)
 
 1. **Prefer `pnpm db:generate`** — edit `src/db/schema/**`, run it, and it emits
-   `migrations/0004_<name>.sql` + registers itself in `_journal.json`.
+   the next `NNNN_<name>.sql` + registers itself in `_journal.json`.
 2. **Hand-write only** when drizzle cannot express it (FTS, `PRAGMA`, complex
    data migration). If you hand-write:
-   - Save as `migrations/0004_<name>.sql`.
-   - Manually append `{"idx": 4, "version": "7", "tag": "0004_<name>", "breakpoints": true}` to
+   - Save as `migrations/NNNN_<name>.sql` (next free number).
+   - Manually append `{"idx": N, "version": "7", "tag": "NNNN_<name>", "breakpoints": true}` to
      `migrations/meta/_journal.json`.
    - Separate statements with `--> statement-breakpoint`.
-3. **Never** edit `0000`–`0003`. The journal numbers are monotonically increasing;
+3. **Never** edit an already-applied migration. The journal numbers are monotonically increasing;
    a gap or renumber breaks every environment that already applied them.
 4. Test the migration end-to-end locally (`pnpm db:migrate:local`), and keep the
    change honest: if it moves data, it belongs in the migration, not in app code.

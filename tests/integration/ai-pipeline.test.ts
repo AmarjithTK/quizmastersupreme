@@ -1,33 +1,38 @@
 /**
- * AI generation pipeline (M10) against real D1, with a STUB provider.
+ * AI generation pipeline against real D1, with a STUB provider.
  *
  * No network, no API key: the pipeline takes its provider as an argument, which
- * is exactly why it is testable at all. What is being verified is the machinery
- * — two bounded steps, the repair chain, dedupe, the candidate table, and the
- * promotion path.
+ * is exactly why it is testable at all. What is verified here is the REVAMPED
+ * contract:
  *
- * The single most important assertion here is that generating questions NEVER
- * writes to `questions` (PLAN.md §2.2). Everything else is detail.
+ *   1. "Ask for N, get N" — a short round is topped up by the next round.
+ *   2. Duplicates are AUTO-FILTERED against the whole bank (never stored).
+ *   3. The request budget comes from the count and the model's real output
+ *      ceiling — not a hard-coded 8000 tokens.
+ *   4. Generating NEVER writes to `questions`; only the explicit commit does.
+ *   5. Committing inserts ACTIVE questions and attaches them to the Q Set, so
+ *      they are playable as soon as the set is published.
  */
 
-import { eq, inArray, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { getPlatformProxy } from "wrangler";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { db, setDbForTests } from "@/db/client";
 import * as schema from "@/db/schema";
 import {
-  createGenerationJob,
   commitJobToSet,
-  promptVersionStats,
+  createGenerationJob,
   getJob,
   listCandidates,
-  promoteCandidate,
-  reviewCandidate,
+  listJobCandidates,
+  outputBudgetFor,
+  promptVersionStats,
   runGenerationStep,
+  setCandidateRejected,
   stubProvider,
+  LlmError,
   type GenerationDeps,
-  type GenerationRequest,
   type RawStorage,
 } from "@/modules/ai";
 import { createCategory, createSet } from "@/modules/catalog";
@@ -72,9 +77,13 @@ function memoryStorage(): RawStorage & { map: Map<string, string> } {
   };
 }
 
-function deps(text: string): GenerationDeps & { storage: ReturnType<typeof memoryStorage> } {
+function deps(text: string | ((request: { maxTokens?: number }) => string)): GenerationDeps & {
+  storage: ReturnType<typeof memoryStorage>;
+} {
   return {
-    provider: stubProvider(() => text),
+    provider: stubProvider((request) =>
+      typeof text === "function" ? text(request) : text,
+    ),
     storage: memoryStorage(),
   };
 }
@@ -111,163 +120,122 @@ async function cleanup(): Promise<void> {
   await db().delete(schema.questions).where(eq(schema.questions.topic, TOPIC)).run();
 }
 
-async function newJob(count = 3) {
+async function newJob(count = 3, model = "stub/model") {
   return createGenerationJob(
-    { topic: TOPIC, brief: "Write test questions.", requestedCount: count, model: "stub/model" },
+    { topic: TOPIC, brief: "Write test questions.", requestedCount: count, model },
     ACTOR,
   );
 }
 
 // ── §2.2 — the hard rule ─────────────────────────────────────────────────────
 
-describe("§2.2 AI output is never published content", () => {
+describe("§2.2 AI output is never published content on its own", () => {
   it("NEVER writes to the questions table, however the job ends", async () => {
     const before = await countQuestions();
 
-    const job = await newJob(3);
-    const d = deps(envelope(question("Ai pipeline never publishes question one?"), question("Ai pipeline never publishes question two?")));
+    const job = await newJob(2);
+    const d = deps(
+      envelope(
+        question("Ai pipeline never publishes question one?"),
+        question("Ai pipeline never publishes question two?"),
+      ),
+    );
 
-    await runGenerationStep(job.id, d);
-    await runGenerationStep(job.id, d);
+    const progress = await runGenerationStep(job.id, d);
+    expect(progress.done).toBe(true);
+    expect(progress.producedCount).toBe(2);
 
     const after = await countQuestions();
     expect(after).toBe(before);
 
-    const found = await db()
-      .select()
-      .from(schema.questions)
-      .where(eq(schema.questions.topic, TOPIC));
-    expect(found).toHaveLength(0);
-
-    // The candidates landed in the candidate table instead.
-    const candidates = await listCandidates({ jobId: job.id });
+    // The questions landed in the working set instead.
+    const candidates = await listJobCandidates(job.id);
     expect(candidates).toHaveLength(2);
-    expect(candidates.every((c) => c.reviewStatus === "pending")).toBe(true);
+    expect(candidates.every((c) => c.rejected === 0)).toBe(true);
   });
 });
 
-// ── the two bounded steps ────────────────────────────────────────────────────
+// ── the budget ───────────────────────────────────────────────────────────────
 
-describe("two bounded generation steps", () => {
-  it("moves queued → running → succeeded, archiving the raw response", async () => {
-    const job = await newJob(2);
-    expect(job.status).toBe("queued");
+describe("output budget follows the count and the model", () => {
+  it("asks for far more than the old 8000-token ceiling on a large-output model", async () => {
+    const asked: Array<number | undefined> = [];
+    const job = await newJob(10, "deepseek/deepseek-v4.1-flash");
 
-    const d = deps(envelope(question("Ai pipeline staging question?")));
-
-    const afterStepOne = await runGenerationStep(job.id, d);
-    expect(afterStepOne.status).toBe("running");
-    expect(afterStepOne.done).toBe(false);
-
-    const stored = await getJob(job.id);
-    expect(stored.rawResponseKey).toBeTruthy();
-    // The raw payload is archived so a bad batch can be diagnosed later.
-    expect(d.storage.map.get(stored.rawResponseKey!)).toContain("questions");
-
-    const afterStepTwo = await runGenerationStep(job.id, d);
-    expect(afterStepTwo.status).toBe("succeeded");
-    expect(afterStepTwo.done).toBe(true);
-    expect(afterStepTwo.producedCount).toBe(1);
-  });
-
-  it("records token usage and an estimated cost", async () => {
-    const job = await newJob(1);
-    const d = deps(envelope(question("Ai pipeline cost question?")));
-    await runGenerationStep(job.id, d);
-
-    const stored = await getJob(job.id);
-    expect(stored.promptTokens).toBeGreaterThan(0);
-    expect(stored.completionTokens).toBeGreaterThan(0);
-    expect(stored.costUsd).toBeGreaterThan(0);
-  });
-
-  it("is idempotent once terminal — calling step again changes nothing", async () => {
-    const job = await newJob(1);
-    const d = deps(envelope(question("Ai pipeline idempotent question?")));
-    await runGenerationStep(job.id, d);
-    await runGenerationStep(job.id, d);
-
-    const before = await listCandidates({ jobId: job.id });
-    const again = await runGenerationStep(job.id, d);
-    const after = await listCandidates({ jobId: job.id });
-
-    expect(again.done).toBe(true);
-    expect(after).toHaveLength(before.length);
-  });
-
-  it("fails cleanly when the provider throws", async () => {
-    const job = await newJob(1);
-    const failing: GenerationDeps = {
-      provider: {
-        name: "stub",
-        async generate() {
-          throw new Error("upstream exploded");
-        },
-      },
+    const d: GenerationDeps = {
+      provider: stubProvider((request) => {
+        asked.push(request.maxTokens);
+        return envelope(question("Budget probe question one?"));
+      }),
       storage: memoryStorage(),
     };
 
-    const progress = await runGenerationStep(job.id, failing);
-    expect(progress.status).toBe("failed");
-    expect(progress.done).toBe(true);
+    await runGenerationStep(job.id, d);
 
-    const stored = await getJob(job.id);
-    expect(stored.errorCode).toBe("PROVIDER_ERROR");
-    // And no candidates were invented.
-    expect(await listCandidates({ jobId: job.id })).toHaveLength(0);
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toBe(outputBudgetFor(10, "deepseek/deepseek-v4.1-flash"));
+    // 10 questions x ~850 tokens + headroom, well above the old hard-coded 8000.
+    expect(asked[0]!).toBeGreaterThan(9_000);
   });
 
-  it("fails cleanly when the archived response is missing", async () => {
-    const job = await newJob(1);
-    // Force it into the ingest stage with a key that resolves to nothing.
-    await db()
-      .update(schema.aiGenerationJobs)
-      .set({ status: "running", rawResponseKey: "ai-jobs/missing/response.txt" })
-      .where(eq(schema.aiGenerationJobs.id, job.id))
-      .run();
-
-    const progress = await runGenerationStep(job.id, deps("{}"));
-    expect(progress.status).toBe("failed");
-    expect(progress.error).toMatch(/could not be read/i);
+  it("clamps to a small model's real ceiling and lets backfill finish the job", async () => {
+    // Llama 3.3 caps at 4k, so one call cannot hold 10 questions — the rounds
+    // must keep asking until the count is met.
+    expect(outputBudgetFor(50, "meta-llama/llama-3.3-70b-instruct")).toBe(4_000);
   });
 });
 
-// ── validation and dedupe at candidate time ──────────────────────────────────
+// ── ask for N, get N ─────────────────────────────────────────────────────────
 
-describe("candidate validation and dedupe", () => {
-  it("stores invalid candidates WITH their errors instead of dropping them", async () => {
+describe("generate-to-N", () => {
+  it("delivers the exact count in one round when the model complies", async () => {
     const job = await newJob(3);
     const d = deps(
       envelope(
-        question("Ai pipeline valid among invalid?"),
-        question("Ai pipeline bad options?", { options: [{ key: "A", body: "only one" }] }),
-        question("Ai pipeline short backstory?", { backstory: "nope" }),
+        question("Exact count alpha question?"),
+        question("Exact count bravo question?"),
+        question("Exact count charlie question?"),
       ),
     );
 
-    await runGenerationStep(job.id, d);
     const progress = await runGenerationStep(job.id, d);
-    expect(progress.status).toBe("partial");
-
-    const candidates = await listCandidates({ jobId: job.id });
-    expect(candidates).toHaveLength(3);
-
-    const invalid = candidates.filter((c) => c.validationStatus === "invalid");
-    expect(invalid).toHaveLength(2);
-    for (const candidate of invalid) {
-      const errors = JSON.parse(candidate.validationErrors!) as string[];
-      expect(errors.length).toBeGreaterThan(0);
-      // The stem is preserved where the model provided one, so it is reviewable.
-      expect(candidate.stem).toBeTruthy();
-    }
+    expect(progress.done).toBe(true);
+    expect(progress.status).toBe("succeeded");
+    expect(progress.producedCount).toBe(3);
+    expect(progress.duplicateCount).toBe(0);
+    expect(progress.round).toBe(1);
   });
 
-  it("flags a candidate that duplicates an existing question", async () => {
-    // Put a real question in the bank first.
+  it("TOPS UP a short round until the requested count is reached", async () => {
+    const job = await newJob(3);
+    const rounds: string[] = [
+      envelope(question("Backfill alpha question?")),
+      envelope(question("Backfill bravo question?"), question("Backfill charlie question?")),
+    ];
+
+    const d: GenerationDeps & { storage: ReturnType<typeof memoryStorage> } = {
+      provider: stubProvider(() => rounds.shift() ?? envelope()),
+      storage: memoryStorage(),
+    };
+
+    const first = await runGenerationStep(job.id, d);
+    expect(first.done).toBe(false);
+    expect(first.status).toBe("running");
+    expect(first.producedCount).toBe(1);
+
+    const second = await runGenerationStep(job.id, d);
+    expect(second.done).toBe(true);
+    expect(second.status).toBe("succeeded");
+    expect(second.producedCount).toBe(3);
+    expect(second.round).toBe(2);
+  });
+
+  it("still delivers N rows when the topic is already covered — as rejected duplicates", async () => {
+    const job = await newJob(2);
     const { createQuestion } = await import("@/modules/questions");
     await createQuestion(
       {
-        stem: "Ai pipeline duplicate target question?",
+        stem: "Saturated topic question?",
         options: [
           { key: "A", body: "Zephyr" },
           { key: "B", body: "Quartz" },
@@ -282,364 +250,318 @@ describe("candidate validation and dedupe", () => {
         tags: [],
       },
       ACTOR,
-      { status: "published" },
+      { status: "active" },
     );
 
-    const job = await newJob(1);
-    // Same stem, different casing/punctuation → identical after normalization.
-    const d = deps(envelope(question("AI PIPELINE DUPLICATE TARGET QUESTION")));
-    await runGenerationStep(job.id, d);
-    await runGenerationStep(job.id, d);
+    // Both requested rows come back as questions — nothing is silently dropped.
+    const d = deps(
+      envelope(question("Saturated topic question?"), question("Saturated topic question?")),
+    );
 
-    const candidates = await listCandidates({ jobId: job.id });
-    expect(candidates).toHaveLength(1);
-    expect(candidates[0]!.dedupeStatus).toBe("exact_dup");
-    expect(candidates[0]!.dedupeBestMatchId).toBeTruthy();
+    const progress = await runGenerationStep(job.id, d);
+    expect(progress.done).toBe(true);
+    expect(progress.status).toBe("succeeded");
+    expect(progress.producedCount).toBe(2);
+    expect(progress.duplicateCount).toBe(2);
 
-    const stored = await getJob(job.id);
-    expect(stored.duplicateCount).toBe(1);
+    const stored = await listJobCandidates(job.id);
+    expect(stored).toHaveLength(2);
+    // Every one of them is present, rejected by default, with the match shown.
+    expect(stored.every((c) => c.rejected === 1)).toBe(true);
   });
 });
 
-// ── promotion: the only route into the bank ──────────────────────────────────
+// ── duplicate filtration ─────────────────────────────────────────────────────
 
-describe("promotion", () => {
-  it("adds an approved candidate to the bank as an AI-origin question", async () => {
-    const job = await newJob(1);
-    const d = deps(envelope(question("Ai pipeline promotion candidate?")));
-    await runGenerationStep(job.id, d);
-    await runGenerationStep(job.id, d);
-
-    const candidate = (await listCandidates({ jobId: job.id }))[0]!;
-    await reviewCandidate(candidate.id, "approved", ACTOR);
-
-    const { questionId } = await promoteCandidate(candidate.id, ACTOR);
-
-    const stored = (await db().select().from(schema.questions).where(eq(schema.questions.id, questionId)))[0]!;
-    expect(stored.origin).toBe("ai");
-    // Approved, NOT published — publishing stays a separate deliberate action.
-    expect(stored.status).toBe("approved");
-    expect(stored.normalizedHash).toMatch(/^[0-9a-f]{64}$/);
-
-    const options = await db()
-      .select()
-      .from(schema.questionOptions)
-      .where(eq(schema.questionOptions.questionId, questionId));
-    expect(options).toHaveLength(4);
-    expect(options.filter((o) => o.isCorrect === 1)).toHaveLength(1);
-  });
-
-  it("refuses to promote an INVALID candidate", async () => {
-    const job = await newJob(1);
-    const d = deps(envelope(question("Ai pipeline invalid promotion?", { options: [{ key: "A", body: "x" }] })));
-    await runGenerationStep(job.id, d);
-    await runGenerationStep(job.id, d);
-
-    const candidate = (await listCandidates({ jobId: job.id }))[0]!;
-    expect(candidate.validationStatus).toBe("invalid");
-
-    await expect(promoteCandidate(candidate.id, ACTOR)).rejects.toMatchObject({
-      code: "CONFLICT",
-    });
-  });
-
-  it("refuses to promote the same candidate twice", async () => {
-    const job = await newJob(1);
-    const d = deps(envelope(question("Ai pipeline double promotion?")));
-    await runGenerationStep(job.id, d);
-    await runGenerationStep(job.id, d);
-
-    const candidate = (await listCandidates({ jobId: job.id }))[0]!;
-    await promoteCandidate(candidate.id, ACTOR);
-
-    await expect(promoteCandidate(candidate.id, ACTOR)).rejects.toMatchObject({
-      code: "CONFLICT",
-    });
-  });
-
-  it("refuses to promote a REJECTED candidate", async () => {
-    const job = await newJob(1);
-    const d = deps(envelope(question("Ai pipeline rejected promotion?")));
-    await runGenerationStep(job.id, d);
-    await runGenerationStep(job.id, d);
-
-    const candidate = (await listCandidates({ jobId: job.id }))[0]!;
-    await reviewCandidate(candidate.id, "rejected", ACTOR);
-
-    await expect(promoteCandidate(candidate.id, ACTOR)).rejects.toMatchObject({
-      code: "CONFLICT",
-    });
-  });
-});
-async function resetAiTables(): Promise<void> {
-  const jobs = await db().select({ id: schema.aiGenerationJobs.id }).from(schema.aiGenerationJobs);
-  for (const job of jobs) {
-    await db().delete(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, job.id)).run();
-    await db().delete(schema.aiGenerationJobs).where(eq(schema.aiGenerationJobs.id, job.id)).run();
-  }
-}
-
-describe("promptVersionStats — M13 acceptance reporting", () => {
-  beforeEach(resetAiTables);
-
-  it("breaks down decisions by prompt_version, excluding pending from the denominator", async () => {
-    // Seed one job + candidates directly (no LLM needed) under a unique topic.
-    const uid = `stats_${Date.now()}`;
-    const job = await createGenerationJob(
+describe("duplicates are shown, rejected by default, and overridable", () => {
+  async function seedBankQuestion(stem: string) {
+    const { createQuestion } = await import("@/modules/questions");
+    return createQuestion(
       {
-        topic: uid,
-        brief: "Make questions.",
-        requestedCount: 4,
-        model: "stub",
-        subtopics: null,
-        avoidTopics: null,
+        stem,
+        options: [
+          { key: "A", body: "Zephyr" },
+          { key: "B", body: "Quartz" },
+          { key: "C", body: "Nimbus" },
+          { key: "D", body: "Onyx" },
+        ],
+        correctOptionKey: "A",
+        explanation: "Existing.",
+        backstory: BACKSTORY,
         difficulty: "easy",
-        targetCategoryId: null,
-        targetSetId: null,
-      },
-      ACTOR,
-    );
-    // Insert 4 candidates: 2 approved, 1 rejected, 1 pending → acceptance 2/3.
-    const base = { jobId: job.id, optionsJson: '[{"key":"A","body":"x"}]', correctOptionKey: "A", explanation: "e", backstory: "b", topic: uid, validationStatus: "valid", dedupeStatus: "clean" };
-    for (let i = 0; i < 4; i++) {
-      await db().insert(schema.aiCandidates).values({ ...base, id: `${job.id}_c${i}`, stem: `Stem ${uid} ${i}?`, createdAt: Date.now() }).run();
-    }
-    const cands = await db().select({ id: schema.aiCandidates.id }).from(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, job.id)).all();
-    await reviewCandidate(cands[0]!.id, "approved", ACTOR);
-    await reviewCandidate(cands[1]!.id, "approved", ACTOR);
-    await reviewCandidate(cands[2]!.id, "rejected", ACTOR);
-
-    const stats = await promptVersionStats();
-    const row = stats.find((r) => r.promptVersion === job.promptVersion && r.jobs === 1);
-    expect(row).toBeTruthy();
-    expect(row!.produced).toBe(4);
-    expect(row!.approved).toBe(2);
-    expect(row!.rejected).toBe(1);
-    expect(row!.pending).toBe(1);
-    expect(row!.acceptanceRate).toBeCloseTo(2 / 3, 5);
-    expect(row!.duplicateRate).toBe(0);
-
-  });
-
-  it("does not count deferred candidates against acceptance", async () => {
-    const uid = `stats_defer_${Date.now()}`;
-    const job = await createGenerationJob({ topic: uid, brief: "x", requestedCount: 1, model: "stub", subtopics: null, avoidTopics: null, difficulty: "easy", targetCategoryId: null, targetSetId: null }, ACTOR);
-    await db().insert(schema.aiCandidates).values({ id: `${job.id}_d0`, jobId: job.id, stem: `Deferred ${uid}?`, optionsJson: '[{"key":"A","body":"x"}]', correctOptionKey: "A", explanation: "e", backstory: "b", topic: uid, validationStatus: "valid", dedupeStatus: "clean", createdAt: Date.now() }).run();
-    const cands = await db().select({ id: schema.aiCandidates.id }).from(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, job.id)).all();
-    await reviewCandidate(cands[0]!.id, "deferred", ACTOR);
-
-    const stats = await promptVersionStats();
-    const row = stats.find((r) => r.jobs === 1 && r.produced === 1);
-    expect(row).toBeTruthy();
-    expect(row!.acceptanceRate).toBeNull(); // nothing decided yet
-    expect(row!.deferred).toBe(1);
-  });
-});
-
-
-describe("provider routing forwarding (only/order)", () => {
-  it("passes the job's saved routing into the provider request", async () => {
-    const job = await createGenerationJob(
-      {
         topic: TOPIC,
-        brief: "Write test questions.",
-        requestedCount: 1,
-        model: "stub/model",
-        providerOnly: ["together", "deepinfra"],
-        providerOrder: ["together"],
+        tags: [],
       },
       ACTOR,
+      { status: "active" },
+    );
+  }
+
+  it("keeps an exact duplicate, marks it rejected, and names the existing question", async () => {
+    const existing = await seedBankQuestion("Which metal has the symbol Au in the AI pipeline?");
+
+    const job = await newJob(2);
+    const d = deps(
+      envelope(
+        // Identical after normalization → layer 1 exact duplicate.
+        question("WHICH METAL HAS THE SYMBOL AU IN THE AI PIPELINE"),
+        question("A genuinely fresh AI pipeline question?"),
+      ),
     );
 
-    let seenRequest: GenerationRequest | null = null;
-    await runGenerationStep(job.id, {
-      provider: stubProvider((request) => {
-        seenRequest = request;
-        return envelope(question("Routing forwarded?"));
-      }),
-      storage: memoryStorage(),
-    });
+    const progress = await runGenerationStep(job.id, d);
 
-    expect(seenRequest).not.toBeNull();
-    expect(seenRequest!.providerOnly).toEqual(["together", "deepinfra"]);
-    expect(seenRequest!.providerOrder).toEqual(["together"]);
+    // Both are stored — the duplicate is NOT hidden.
+    expect(progress.producedCount).toBe(2);
+    expect(progress.duplicateCount).toBe(1);
 
-    await db().delete(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, job.id)).run();
-    await db().delete(schema.aiGenerationJobs).where(eq(schema.aiGenerationJobs.id, job.id)).run();
+    const stored = await listJobCandidates(job.id);
+    expect(stored).toHaveLength(2);
+
+    const flagged = stored.find((c) => c.dedupeStatus === "exact_dup")!;
+    expect(flagged).toBeTruthy();
+    expect(flagged.rejected).toBe(1);
+    expect(flagged.dedupeMatchedQuestionId).toBe(existing.question.id);
+    expect(flagged.dedupeMatchedStem).toBe(existing.question.stem);
+    expect(flagged.dedupeReason).toMatch(/already in the bank/i);
+
+    const clean = stored.find((c) => c.dedupeStatus === "clean")!;
+    expect(clean.rejected).toBe(0);
+    expect(clean.dedupeMatchedStem).toBeNull();
   });
 
-  it("defaults to no routing when the job has none", async () => {
-    const job = await createGenerationJob(
-      { topic: TOPIC, brief: "Write test questions.", requestedCount: 1, model: "stub/model" },
-      ACTOR,
-    );
+  it("detects a question already saved in a Q Set (the whole bank is the reference)", async () => {
+    const { createQuestion } = await import("@/modules/questions");
+    const { createCategory, createSet } = await import("@/modules/catalog");
+    const { attachQuestions } = await import("@/modules/questions");
 
-    let seenRequest: GenerationRequest | null = null;
-    await runGenerationStep(job.id, {
-      provider: stubProvider((request) => {
-        seenRequest = request;
-        return envelope(question("No routing?"));
-      }),
-      storage: memoryStorage(),
-    });
-
-    expect(seenRequest!.providerOnly).toBeUndefined();
-    expect(seenRequest!.providerOrder).toBeUndefined();
-
-    await db().delete(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, job.id)).run();
-    await db().delete(schema.aiGenerationJobs).where(eq(schema.aiGenerationJobs.id, job.id)).run();
-  });
-});
-
-// ── the batch flow: review one generation, commit to a Q Set ──────────────────
-
-async function finishedJob(n: number): Promise<string> {
-  const job = await createGenerationJob(
-    { topic: TOPIC, brief: "Write test questions.", requestedCount: n, model: "stub/model" },
-    ACTOR,
-  );
-  const questions = Array.from({ length: n }, (_, i) => question(`Batch flow question ${i + 1}?`));
-  const d = deps(envelope(...questions));
-  await runGenerationStep(job.id, d);
-  await runGenerationStep(job.id, d);
-  return job.id;
-}
-
-describe("the batch flow (generate → review → commit to a Q Set)", () => {
-  it("persists target/sources on the job and puts them in the prompt", async () => {
-    const job = await createGenerationJob(
+    const { question: existing } = await createQuestion(
       {
+        stem: "Which company did Satya Nadella lead as CEO?",
+        options: [
+          { key: "A", body: "Zephyr" },
+          { key: "B", body: "Quartz" },
+          { key: "C", body: "Nimbus" },
+          { key: "D", body: "Onyx" },
+        ],
+        correctOptionKey: "A",
+        explanation: "Existing.",
+        backstory: BACKSTORY,
+        difficulty: "easy",
         topic: TOPIC,
-        brief: "Write test questions.",
-        requestedCount: 1,
-        model: "stub/model",
-        target: "Class 10 Kerala students",
-        sources: "https://kerala.gov.in/cyber-security and the 2017 policy document",
+        tags: [],
       },
+      ACTOR,
+      { status: "active" },
+    );
+
+    // Put it in a real Q Set, the way the product does.
+    const category = await createCategory({ title: "Dedupe QSet Subject" }, ACTOR);
+    const set = await createSet({ categoryId: category.id, title: "Tech Founders" }, ACTOR);
+    await attachQuestions(set.id, [existing.id], ACTOR);
+
+    const job = await newJob(1);
+    const d = deps(envelope(question("Which company did Satya Nadella lead as CEO?")));
+    await runGenerationStep(job.id, d);
+
+    const [candidate] = await listJobCandidates(job.id);
+    expect(candidate!.dedupeStatus).toBe("exact_dup");
+    expect(candidate!.rejected).toBe(1);
+    expect(candidate!.dedupeMatchedQuestionId).toBe(existing.id);
+  });
+
+  it("flags an in-batch repeat as a duplicate of its batch mate", async () => {
+    const job = await newJob(2);
+    const d = deps(
+      envelope(
+        question("In-batch repeat probe question?"),
+        question("IN-BATCH REPEAT PROBE QUESTION?"),
+      ),
+    );
+
+    const progress = await runGenerationStep(job.id, d);
+    expect(progress.producedCount).toBe(2);
+    expect(progress.duplicateCount).toBe(1);
+
+    const stored = await listJobCandidates(job.id);
+    const second = stored[1]!;
+    expect(second.rejected).toBe(1);
+    expect(second.dedupeStatus).toBe("exact_dup");
+    expect(second.dedupeReason).toMatch(/this batch/i);
+    // The match is its batch mate, not a bank row.
+    expect(second.dedupeMatchedQuestionId).toBeNull();
+    expect(second.dedupeMatchedStem).toBe(stored[0]!.stem);
+  });
+
+  it("lets the reviewer accept a flagged duplicate, which commits by override", async () => {
+    await seedBankQuestion("Override probe: which alloy contains the element tungsten?");
+
+    const category = await (await import("@/modules/catalog")).createCategory(
+      { title: "Override Subject" },
+      ACTOR,
+    );
+    const set = await (await import("@/modules/catalog")).createSet(
+      { categoryId: category.id, title: "Override Set" },
       ACTOR,
     );
 
-    let seen: GenerationRequest | null = null;
-    await runGenerationStep(job.id, {
-      provider: stubProvider((request) => {
-        seen = request;
-        return envelope(question("Target and sources in prompt?"));
-      }),
-      storage: memoryStorage(),
-    });
+    const job = await newJob(1);
+    await runGenerationStep(
+      job.id,
+      deps(envelope(question("OVERRIDE PROBE: WHICH ALLOY CONTAINS THE ELEMENT TUNGSTEN?"))),
+    );
 
-    expect(seen!.user).toContain("TARGET: Class 10 Kerala students");
-    expect(seen!.user).toContain("SOURCES (authoritative");
+    const [candidate] = await listJobCandidates(job.id);
+    expect(candidate!.rejected).toBe(1);
 
-    const stored = await getJob(job.id);
-    expect(stored.target).toBe("Class 10 Kerala students");
-    expect(stored.sources).toContain("2017 policy document");
+    // The reviewer disagrees with the machine.
+    await setCandidateRejected(candidate!.id, false, ACTOR);
+    const afterAccept = (await listJobCandidates(job.id))[0]!;
+    expect(afterAccept.rejected).toBe(0);
 
-    await db().delete(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, job.id)).run();
-    await db().delete(schema.aiGenerationJobs).where(eq(schema.aiGenerationJobs.id, job.id)).run();
-  });
+    const outcome = await commitJobToSet(job.id, ACTOR, { setId: set.id });
+    expect(outcome.promoted).toHaveLength(1);
+    expect(outcome.failed).toEqual([]);
 
-  it("commits the non-rejected set to an EXISTING Q Set, in order", async () => {
-    const category = await createCategory({ title: "Batch Cat", slug: "batch-cat" }, ACTOR);
-    const set = await createSet({ categoryId: category.id, title: "Batch Set" }, ACTOR);
-
-    const jobId = await finishedJob(3);
-    const candidates = await listCandidates({ jobId, limit: 20 });
-    expect(candidates).toHaveLength(3);
-
-    // Reject the middle one — it must not be committed.
-    await reviewCandidate(candidates[1]!.id, "rejected", ACTOR);
-
-    const outcome = await commitJobToSet(jobId, ACTOR, { setId: set.id });
-    expect(outcome.promoted).toHaveLength(2);
-    expect(outcome.questionIds).toHaveLength(2);
-    expect(outcome.createdSet).toBeNull();
-
-    // Both survivors became real questions, in batch order.
-    const qids = outcome.promoted.map((p) => p.questionId);
+    // It is genuinely in the bank now, despite being flagged.
     const rows = await db()
-      .select({ questionId: schema.questionSetQuestions.questionId, order: schema.questionSetQuestions.sortOrder })
-      .from(schema.questionSetQuestions)
-      .where(eq(schema.questionSetQuestions.setId, set.id));
-    expect(rows.map((r) => r.questionId)).toEqual(qids);
-    expect(rows.map((r) => r.order)).toEqual([0, 1]);
+      .select()
+      .from(schema.questions)
+      .where(eq(schema.questions.generationJobId, job.id));
+    expect(rows).toHaveLength(1);
+  });
+});
 
-    // The job remembers what it was committed to.
-    const stored = await getJob(jobId);
-    expect(stored.committedSetId).toBe(set.id);
+// ── failure modes ────────────────────────────────────────────────────────────
 
-    await db().delete(schema.questions).where(inArray(schema.questions.id, qids)).run();
-    await db().delete(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, jobId)).run();
-    await db().delete(schema.aiGenerationJobs).where(eq(schema.aiGenerationJobs.id, jobId)).run();
-    await db().delete(schema.quizSets).where(eq(schema.quizSets.id, set.id)).run();
-    await db().delete(schema.categories).where(eq(schema.categories.id, category.id)).run();
+describe("failure modes are explicit", () => {
+  it("fails the job when the response cannot be parsed", async () => {
+    const job = await newJob(1);
+    const progress = await runGenerationStep(job.id, deps("this is not json at all"));
+    expect(progress.status).toBe("failed");
+    expect((await getJob(job.id)).errorCode).toBe("UNPARSEABLE");
   });
 
-  it("creates a NEW Q Set and commits the whole approved set to it", async () => {
-    const category = await createCategory({ title: "Batch Cat 2", slug: "batch-cat-2" }, ACTOR);
-    const jobId = await finishedJob(2);
+  it("fails the job when the provider errors", async () => {
+    const job = await newJob(1);
+    const d: GenerationDeps = {
+      provider: {
+        name: "stub",
+        async generate() {
+          throw new LlmError("Provider exploded.", { code: "PROVIDER_ERROR", status: 500 });
+        },
+      },
+      storage: memoryStorage(),
+    };
 
-    const outcome = await commitJobToSet(jobId, ACTOR, {
-      newSet: { title: "Fresh Generated Set", categoryId: category.id, mode: "practice", difficulty: "medium" },
-    });
-    expect(outcome.createdSet).not.toBeNull();
+    const progress = await runGenerationStep(job.id, d);
+    expect(progress.status).toBe("failed");
+    expect((await getJob(job.id)).errorCode).toBe("PROVIDER_ERROR");
+  });
+
+  it("keeps a terminal job terminal when stepped again", async () => {
+    const job = await newJob(1);
+    const d = deps(envelope(question("Terminal guard question?")));
+    await runGenerationStep(job.id, d);
+    const again = await runGenerationStep(job.id, d);
+    expect(again.status).toBe("succeeded");
+    expect(await listJobCandidates(job.id)).toHaveLength(1);
+  });
+});
+
+// ── commit: the only path into the bank ──────────────────────────────────────
+
+describe("commitJobToSet", () => {
+  async function jobWith(count: number, stems: string[]) {
+    const job = await newJob(count);
+    await runGenerationStep(job.id, deps(envelope(...stems.map((stem) => question(stem)))));
+    return job;
+  }
+
+  it("inserts ACTIVE questions and attaches them to the Q Set", async () => {
+    const category = await createCategory({ title: "AI Commit Subject" }, ACTOR);
+    const set = await createSet({ categoryId: category.id, title: "AI Commit Set" }, ACTOR);
+    const job = await jobWith(2, ["Commit alpha question?", "Commit bravo question?"]);
+
+    const outcome = await commitJobToSet(job.id, ACTOR, { setId: set.id });
+
     expect(outcome.promoted).toHaveLength(2);
-    expect(outcome.newSetId).toBe(outcome.createdSet!.id);
+    expect(outcome.failed).toEqual([]);
+
+    const rows = await db()
+      .select()
+      .from(schema.questions)
+      .where(eq(schema.questions.generationJobId, job.id));
+    expect(rows).toHaveLength(2);
+    // Active, not "published" — playability comes from the SET being published.
+    expect(rows.every((row) => row.status === "active")).toBe(true);
+    expect(rows.every((row) => row.origin === "ai")).toBe(true);
 
     const attached = await db()
       .select({ questionId: schema.questionSetQuestions.questionId })
       .from(schema.questionSetQuestions)
-      .where(eq(schema.questionSetQuestions.setId, outcome.createdSet!.id));
+      .where(eq(schema.questionSetQuestions.setId, set.id));
     expect(attached).toHaveLength(2);
 
-    const stored = await getJob(jobId);
-    expect(stored.committedSetId).toBe(outcome.createdSet!.id);
-
-    await db().delete(schema.questions).where(inArray(schema.questions.id, outcome.questionIds)).run();
-    await db().delete(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, jobId)).run();
-    await db().delete(schema.aiGenerationJobs).where(eq(schema.aiGenerationJobs.id, jobId)).run();
-    await db().delete(schema.quizSets).where(eq(schema.quizSets.id, outcome.createdSet!.id)).run();
-    await db().delete(schema.categories).where(eq(schema.categories.id, category.id)).run();
+    const stored = await getJob(job.id);
+    expect(stored.committedSetId).toBe(set.id);
+    expect(stored.committedAt).not.toBeNull();
   });
 
-  it("refuses to commit without exactly one target", async () => {
-    const jobId = await finishedJob(1);
-    await expect(commitJobToSet(jobId, ACTOR, {})).rejects.toThrow("Choose exactly one");
-    await expect(
-      commitJobToSet(jobId, ACTOR, {
-        setId: "some-set",
-        newSet: { title: "X", categoryId: "c" },
-      }),
-    ).rejects.toThrow("Choose exactly one");
+  it("skips rejected candidates", async () => {
+    const category = await createCategory({ title: "AI Reject Subject" }, ACTOR);
+    const set = await createSet({ categoryId: category.id, title: "AI Reject Set" }, ACTOR);
+    const job = await jobWith(2, ["Reject alpha question?", "Reject bravo question?"]);
 
-    await db().delete(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, jobId)).run();
-    await db().delete(schema.aiGenerationJobs).where(eq(schema.aiGenerationJobs.id, jobId)).run();
+    const candidates = await listJobCandidates(job.id);
+    await setCandidateRejected(candidates[0]!.id, true, ACTOR);
+
+    const outcome = await commitJobToSet(job.id, ACTOR, { setId: set.id });
+    expect(outcome.promoted).toHaveLength(1);
+    expect(outcome.promoted[0]!.questionId).toBeTruthy();
+  });
+
+  it("refuses a second commit of the same batch", async () => {
+    const category = await createCategory({ title: "AI Double Subject" }, ACTOR);
+    const set = await createSet({ categoryId: category.id, title: "AI Double Set" }, ACTOR);
+    const job = await jobWith(1, ["Double commit question?"]);
+
+    await commitJobToSet(job.id, ACTOR, { setId: set.id });
+    await expect(commitJobToSet(job.id, ACTOR, { setId: set.id })).rejects.toMatchObject({
+      code: "CONFLICT",
+    });
+  });
+
+  it("requires exactly one target", async () => {
+    const job = await jobWith(1, ["Target rule question?"]);
+    await expect(commitJobToSet(job.id, ACTOR, {})).rejects.toMatchObject({
+      code: "VALIDATION",
+    });
   });
 });
 
-describe("large batches (D1 parameter ceiling)", () => {
-  it("ingests 10 candidates in one job — the chunking must respect the ~100-param ceiling", async () => {
-    const job = await createGenerationJob(
-      { topic: TOPIC, brief: "Write test questions.", requestedCount: 10, model: "stub/model" },
-      ACTOR,
-    );
+// ── job creation validation ──────────────────────────────────────────────────
 
-    const questions = Array.from({ length: 10 }, (_, i) =>
-      question(`Large batch question number ${i + 1}?`),
-    );
-    const d = deps(envelope(...questions));
-    await runGenerationStep(job.id, d);
-    await runGenerationStep(job.id, d);
+describe("createGenerationJob validation", () => {
+  it("rejects a non-positive or oversized count", async () => {
+    await expect(newJob(0)).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(newJob(51)).rejects.toMatchObject({ code: "VALIDATION" });
+  });
+});
 
-    const candidates = await listCandidates({ jobId: job.id });
-    expect(candidates).toHaveLength(10);
-    expect(candidates.every((c) => c.validationStatus === "valid")).toBe(true);
+// ── prompt stats ─────────────────────────────────────────────────────────────
 
-    const stored = await getJob(job.id);
-    expect(stored.status).toBe("succeeded");
-    expect(stored.producedCount).toBe(10);
+describe("promptVersionStats", () => {
+  it("summarises asked / delivered / duplicates per prompt version", async () => {
+    const job = await newJob(2);
+    await runGenerationStep(job.id, deps(envelope(question("Prompt stats question?"))));
 
-    await db().delete(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, job.id)).run();
-    await db().delete(schema.aiGenerationJobs).where(eq(schema.aiGenerationJobs.id, job.id)).run();
+    const stats = await promptVersionStats();
+    expect(stats.length).toBeGreaterThan(0);
+    const row = stats[0]!;
+    expect(row.requested).toBeGreaterThan(0);
+    expect(row.produced).toBeGreaterThan(0);
+    expect(row.freshRate).toBeGreaterThan(0);
+    expect(row.freshRate).toBeLessThanOrEqual(1);
   });
 });

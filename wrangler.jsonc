@@ -46,7 +46,7 @@
     "APP_BASE_URL": "http://localhost:3000",
     "GOOGLE_CLIENT_ID": "",
     "ADMIN_EMAILS": "amarjith4097@gmail.com",
-    "DEFAULT_GENERATION_MODEL": "deepseek/deepseek-v4-flash-0731",
+    "DEFAULT_GENERATION_MODEL": "deepseek/deepseek-v4.1-flash",
     "EMBEDDING_MODEL": "@cf/baai/bge-m3"
   },
 

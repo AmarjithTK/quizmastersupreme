@@ -1,16 +1,16 @@
 "use client";
 
 /**
- * The batch review — one generation, one window (PLAN.md §12.6).
+ * The batch review — one generation, one window (REVAMP-PLAN.md §3.4).
  *
- * All candidates from a single AI job are shown together. The admin rejects
- * bad/repeated/not-good-enough questions one by one; everything that survives
- * IS the approved set, and is committed in one action to either an existing
- * Q Set or a freshly created one.
+ * All questions from a single AI job are shown together. Duplicates were
+ * already filtered against the bank when they were generated, so the only job
+ * here is taste: reject anything you do not want, and the rest is committed in
+ * one action to an existing Q Set or a brand-new one.
  *
- * Semantics: within a batch, "kept" is the default. Rejecting sets
- * reviewStatus=rejected (the same server-side field the queue uses); the
- * commit endpoint promotes everything that is NOT rejected.
+ * Committing inserts the kept questions as ACTIVE questions — attached to a
+ * published set they are playable immediately. There is no per-question publish
+ * step.
  */
 
 import { useEffect, useState } from "react";
@@ -24,7 +24,6 @@ import {
   FolderPlus,
   Loader2,
   Save,
-  XCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -38,21 +37,31 @@ type Candidate = {
   backstory: string | null;
   difficulty: string | null;
   topic: string | null;
-  validationStatus: string;
-  validationErrors: string | null;
+  rejected: number;
+  /** 'clean' | 'exact_dup' | 'near_dup' | 'possible_dup' */
   dedupeStatus: string;
+  dedupeMatchedQuestionId: string | null;
+  dedupeMatchedStem: string | null;
   dedupeSimilarity: number | null;
-  dedupeBestMatchId: string | null;
-  dedupeDetail: string | null;
-  reviewStatus: string;
-  promotedQuestionId: string | null;
+  dedupeReason: string | null;
 };
 
 type SetOption = { id: string; title: string; status: string; categoryTitle?: string };
 type CategoryOption = { id: string; title: string };
 
 type JobDetail = {
-  job: { id: string; topic: string; model: string; status: string; committedSetId: string | null; committedAt: number | null };
+  job: {
+    id: string;
+    topic: string;
+    model: string;
+    status: string;
+    requestedCount: number;
+    producedCount: number;
+    duplicateCount: number;
+    backfillRound: number;
+    committedSetId: string | null;
+    committedAt: number | null;
+  };
   candidates: Candidate[];
 };
 
@@ -73,34 +82,33 @@ function parseOptions(raw: string): Array<{ key: string; body: string }> {
   }
 }
 
-function dedupeBadge(candidate: Candidate): { label: string; tone: string } | null {
-  const map: Record<string, string> = {
-    exact_dup: "border-red-200 bg-red-50 text-red-700",
-    near_dup: "border-amber-200 bg-amber-50 text-amber-800",
-    semantic_dup: "border-amber-200 bg-amber-50 text-amber-800",
-  };
-  const tone = map[candidate.dedupeStatus];
-  if (!tone) return null;
-  const extra =
-    candidate.dedupeSimilarity != null
-      ? ` (${Math.round(candidate.dedupeSimilarity * 100)}%)`
-      : "";
-  const labels: Record<string, string> = {
-    exact_dup: "Duplicate",
-    near_dup: "Possible duplicate",
-    semantic_dup: "Possible duplicate",
-  };
-  return { label: `${labels[candidate.dedupeStatus]}${extra}`, tone };
+/**
+ * How a flagged duplicate is labelled. Both the certain and the uncertain bands
+ * arrive rejected by default — the difference is how loudly we say it.
+ */
+function duplicateBadge(status: string): { label: string; tone: string } | null {
+  switch (status) {
+    case "exact_dup":
+      return { label: "Duplicate", tone: "border-rose-300 bg-rose-50 text-rose-700" };
+    case "near_dup":
+      return { label: "Near duplicate", tone: "border-amber-300 bg-amber-50 text-amber-800" };
+    case "possible_dup":
+      return { label: "Possible duplicate", tone: "border-amber-300 bg-amber-50 text-amber-800" };
+    default:
+      return null;
+  }
 }
 
 export function BatchReview({
   jobId,
-  initialTopic,
+  refreshKey = 0,
   sets,
   categories,
   onCommitted,
 }: {
   jobId: string;
+  /** Bumped by the generator after each round so the list fills in live. */
+  refreshKey?: number;
   initialTopic?: string;
   sets: SetOption[];
   categories: CategoryOption[];
@@ -135,7 +143,7 @@ export function BatchReview({
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jobId]);
+  }, [jobId, refreshKey]);
 
   if (loadError) {
     return (
@@ -154,53 +162,39 @@ export function BatchReview({
   }
 
   const candidates = detail.candidates;
-  const rejected = new Set(candidates.filter((c) => c.reviewStatus === "rejected").map((c) => c.id));
-  const kept = candidates.filter((c) => !rejected.has(c.id) && !c.promotedQuestionId);
-  const alreadyPromoted = candidates.filter((c) => c.promotedQuestionId);
-  const duplicates = candidates.filter((c) =>
-    ["exact_dup", "near_dup", "semantic_dup"].includes(c.dedupeStatus),
-  );
+  const rejected = new Set(candidates.filter((c) => c.rejected === 1).map((c) => c.id));
+  const kept = candidates.filter((c) => c.rejected !== 1);
+  const flagged = candidates.filter((c) => c.dedupeStatus !== "clean");
+  const alreadyCommitted = detail.job.committedAt != null;
 
-  async function reject(candidateId: string) {
-    setBusyCandidateId(candidateId);
+  async function toggleReject(candidate: Candidate) {
+    const next = candidate.rejected !== 1;
+    setBusyCandidateId(candidate.id);
     try {
-      const res = await fetch(`/api/admin/candidates/${candidateId}/review`, {
-        method: "POST",
+      const res = await fetch(`/api/admin/candidates/${candidate.id}`, {
+        method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "rejected" }),
+        body: JSON.stringify({ rejected: next }),
       });
       if (!res.ok) {
         const body = (await res.json()) as { error?: { message: string } };
-        throw new Error(body.error?.message ?? "Reject failed.");
+        throw new Error(body.error?.message ?? "Could not save that decision.");
       }
       setDetail((prev) =>
         prev
           ? {
               ...prev,
               candidates: prev.candidates.map((c) =>
-                c.id === candidateId ? { ...c, reviewStatus: "rejected" } : c,
+                c.id === candidate.id ? { ...c, rejected: next ? 1 : 0 } : c,
               ),
             }
           : prev,
       );
     } catch (e) {
-      setCommitError(e instanceof Error ? e.message : "Reject failed.");
+      setCommitError(e instanceof Error ? e.message : "Could not save that decision.");
     } finally {
       setBusyCandidateId(null);
     }
-  }
-
-  function unReject(candidateId: string) {
-    setDetail((prev) =>
-      prev
-        ? {
-            ...prev,
-            candidates: prev.candidates.map((c) =>
-              c.id === candidateId ? { ...c, reviewStatus: "pending" } : c,
-            ),
-          }
-        : prev,
-    );
   }
 
   async function commit() {
@@ -237,7 +231,6 @@ export function BatchReview({
       }
       setOutcome(body.outcome);
       onCommitted?.(body.outcome);
-      setDetail((prev) => (prev ? { ...prev, job: { ...prev.job, committedSetId: (body.outcome!.createdSet?.id ?? targetSetId) ?? null, committedAt: Date.now() } } : prev));
       void load();
     } catch (e) {
       setCommitError(e instanceof Error ? e.message : "Could not add the questions to the Q Set.");
@@ -260,50 +253,45 @@ export function BatchReview({
             Generated set
           </h2>
           <p className="mt-0.5 text-xs text-slate-500">
-            {detail.job.topic} · {detail.job.model} · {candidates.length} questions · job{" "}
-            {jobId.slice(0, 8)}
+            {detail.job.topic} · {detail.job.model} · {candidates.length} question
+            {candidates.length === 1 ? "" : "s"} · job {jobId.slice(0, 8)}
             {detail.job.committedSetId && (
-              <span className="ml-1 text-emerald-600">
-                — added to “{committedSetTitle}”
-              </span>
+              <span className="ml-1 text-emerald-600">— added to “{committedSetTitle}”</span>
             )}
           </p>
         </div>
         <div className="flex flex-wrap gap-2 text-[11px]">
           <span className="rounded bg-slate-100 px-2 py-1 font-medium text-slate-600">
-            {candidates.length} generated
+            asked {detail.job.requestedCount} · delivered {detail.job.producedCount}
           </span>
           <span
             className={cn(
               "rounded px-2 py-1 font-medium",
-              duplicates.length > 0
-                ? "bg-amber-100 text-amber-800"
-                : "bg-emerald-100 text-emerald-700",
+              flagged.length > 0 ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-700",
             )}
           >
-            {duplicates.length} duplicate(s) flagged
+            {flagged.length} flagged as duplicate{flagged.length === 1 ? "" : "s"}
           </span>
           <span className="rounded bg-slate-100 px-2 py-1 font-medium text-slate-600">
             {rejected.size} rejected
           </span>
           <span className="rounded bg-emerald-100 px-2 py-1 font-medium text-emerald-700">
-            {kept.length} approved
+            {kept.length} kept
           </span>
         </div>
       </header>
 
-      {/*
-        Duplicate filtration: exact matches and near/semantic-looking duplicates
-        are flagged here for a human decision — layer-1 exact is auto-flagged by
-        the funnel, everything fuzzy is presented, never auto-deleted (§13.6).
-      */}
-      {duplicates.length > 0 && (
+      {flagged.length > 0 && (
         <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
           <AlertCircle className="mt-0.5 size-4 shrink-0" />
           <span>
-            {duplicates.length} question(s) were flagged as duplicates or possible duplicates
-            against the bank. Nothing is removed automatically — review them below and reject
-            the ones that repeat an existing question or each other.
+            <strong className="font-semibold">
+              {flagged.length} question{flagged.length === 1 ? "" : "s"}
+            </strong>{" "}
+            already exist in the bank (in a Q Set or the question bank). They are shown below —
+            never hidden — and arrive <strong>rejected by default</strong>. Each one names the
+            existing question it matched. Press <strong>Accept</strong> if you judge it genuinely
+            different and it becomes eligible to add.
           </span>
         </div>
       )}
@@ -317,28 +305,21 @@ export function BatchReview({
         )}
         {candidates.map((candidate) => {
           const isRejected = rejected.has(candidate.id);
-          const badge = dedupeBadge(candidate);
           const isExpanded = expanded.has(candidate.id);
-          const invalid =
-            candidate.validationStatus !== "valid"
-              ? (JSON.parse(candidate.validationErrors ?? "[]") as string[])
-              : [];
+          const isFlagged = candidate.dedupeStatus !== "clean";
+          const badge = duplicateBadge(candidate.dedupeStatus);
 
           return (
             <div
               key={candidate.id}
               className={cn(
                 "rounded-xl border bg-white transition-opacity",
-                isRejected
-                  ? "border-slate-200 opacity-50"
-                  : badge
-                    ? "border-amber-300"
-                    : "border-slate-200",
+                isRejected ? "border-slate-200 opacity-60" : "border-slate-200",
               )}
             >
               <div className="flex flex-col gap-2 p-4">
                 <div className="flex flex-wrap items-start justify-between gap-2">
-                  <p className={cn("text-sm font-medium leading-6 text-slate-900", isRejected && "line-through")}>
+                  <p className={cn("text-sm font-medium leading-6 text-slate-900", isRejected && "text-slate-500")}>
                     <span className="mr-1.5 text-xs font-semibold text-slate-400">
                       Q{candidate.batchIndex != null ? candidate.batchIndex + 1 : "–"}
                     </span>
@@ -346,17 +327,21 @@ export function BatchReview({
                   </p>
                   <button
                     type="button"
-                    onClick={() => {
-                      if (isRejected) unReject(candidate.id);
-                      else void reject(candidate.id);
-                    }}
-                    disabled={busyCandidateId !== null}
+                    onClick={() => void toggleReject(candidate)}
+                    disabled={busyCandidateId !== null || alreadyCommitted}
                     className={cn(
-                      "inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold transition-colors",
+                      "inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold transition-colors disabled:opacity-50",
                       isRejected
                         ? "border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
                         : "border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100",
                     )}
+                    title={
+                      isRejected
+                        ? isFlagged
+                          ? "Accept anyway — makes this question eligible for the Q Set"
+                          : "Keep this question"
+                        : "Reject — it will not be added"
+                    }
                   >
                     {busyCandidateId === candidate.id ? (
                       <Loader2 className="size-3.5 animate-spin" />
@@ -365,7 +350,7 @@ export function BatchReview({
                     ) : (
                       <CopyX className="size-3.5" />
                     )}
-                    {isRejected ? "Keep" : "Reject"}
+                    {isRejected ? (isFlagged ? "Accept" : "Keep") : "Reject"}
                   </button>
                 </div>
 
@@ -376,22 +361,60 @@ export function BatchReview({
                   <span className="rounded bg-slate-100 px-1.5 py-0.5 font-medium text-slate-600">
                     {candidate.difficulty ?? "medium"}
                   </span>
+                  {candidate.topic && (
+                    <span className="rounded bg-slate-100 px-1.5 py-0.5 font-medium text-slate-600">
+                      {candidate.topic}
+                    </span>
+                  )}
                   {badge && (
-                    <span className={cn("rounded px-1.5 py-0.5 font-medium", badge.tone)}>
-                      {badge.label}
+                    <span className={cn("rounded border px-1.5 py-0.5 font-semibold", badge.tone)}>
+                      {badge.label} · rejected by default
                     </span>
                   )}
-                  {invalid.length > 0 && (
-                    <span className="rounded bg-red-100 px-1.5 py-0.5 font-medium text-red-700">
-                      {invalid.length} issue(s)
-                    </span>
-                  )}
-                  {candidate.promotedQuestionId && (
-                    <span className="rounded bg-emerald-100 px-1.5 py-0.5 font-medium text-emerald-700">
-                      already in bank
+                  {isFlagged && !isRejected && (
+                    <span className="rounded border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">
+                      accepted by you
                     </span>
                   )}
                 </div>
+
+                {/*
+                  A flagged question is NEVER hidden: it states why it was flagged
+                  and shows the existing question it matched, so the decision can be
+                  made with the evidence in front of the reviewer.
+                */}
+                {isFlagged && (
+                  <div className={cn("flex flex-col gap-1 rounded-lg border px-3 py-2 text-xs", badge?.tone)}>
+                    <p className="font-semibold">
+                      {badge?.label ?? "Flagged"} — rejected by default
+                    </p>
+                    {candidate.dedupeReason && <p>{candidate.dedupeReason}</p>}
+                    {candidate.dedupeMatchedStem && (
+                      <p className="leading-5">
+                        <span className="font-semibold">
+                          {candidate.dedupeMatchedQuestionId
+                            ? "Existing question it matched:"
+                            : "Matched in this batch:"}
+                        </span>{" "}
+                        “{candidate.dedupeMatchedStem}”
+                      </p>
+                    )}
+                    {candidate.dedupeMatchedQuestionId && (
+                      <a
+                        href={`/admin/questions?q=${encodeURIComponent(candidate.dedupeMatchedStem ?? "")}`}
+                        className="w-fit font-medium underline underline-offset-2"
+                      >
+                        Open the existing question in the bank →
+                      </a>
+                    )}
+                    {isRejected && (
+                      <p className="opacity-80">
+                        Press <strong>Accept</strong> if this question is genuinely different — it
+                        then becomes eligible to add to a Q Set.
+                      </p>
+                    )}
+                  </div>
+                )}
 
                 <ul className="grid gap-1 sm:grid-cols-2">
                   {parseOptions(candidate.optionsJson).map((option) => (
@@ -409,12 +432,6 @@ export function BatchReview({
                     </li>
                   ))}
                 </ul>
-
-                {isRejected && (
-                  <p className="text-xs text-slate-400">
-                    Rejected — will not be added to the Q Set.
-                  </p>
-                )}
 
                 <button
                   type="button"
@@ -440,13 +457,6 @@ export function BatchReview({
                         {candidate.explanation}
                       </p>
                     )}
-                    {invalid.length > 0 && (
-                      <ul className="list-disc pl-4 text-red-700">
-                        {invalid.map((issue) => (
-                          <li key={issue}>{issue}</li>
-                        ))}
-                      </ul>
-                    )}
                     {candidate.backstory && (
                       <div>
                         <span className="font-semibold text-slate-700">Backstory:</span>{" "}
@@ -461,12 +471,12 @@ export function BatchReview({
         })}
       </div>
 
-      {/* ── the approved set stays together ────────────────────────────────── */}
+      {/* ── the kept set stays together ────────────────────────────────────── */}
       {kept.length > 0 && (
         <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-4">
           <h3 className="flex items-center gap-2 text-sm font-semibold text-emerald-900">
             <CheckCircle2 className="size-4" />
-            Final approved set — {kept.length} question{kept.length === 1 ? "" : "s"}
+            Will be added — {kept.length} question{kept.length === 1 ? "" : "s"}
           </h3>
           <ul className="mt-2 flex flex-col gap-1">
             {kept.map((candidate) => (
@@ -475,56 +485,75 @@ export function BatchReview({
                   Q{candidate.batchIndex != null ? candidate.batchIndex + 1 : "–"}
                 </span>
                 {candidate.stem}
+                {candidate.dedupeStatus !== "clean" && (
+                  <span className="ml-1.5 rounded bg-emerald-100 px-1 py-0.5 text-[10px] font-semibold text-emerald-800">
+                    duplicate accepted by you
+                  </span>
+                )}
               </li>
             ))}
           </ul>
-          {alreadyPromoted.length > 0 && (
-            <p className="mt-2 text-[11px] text-slate-500">
-              {alreadyPromoted.length} already exist in the bank and are included as-is.
-            </p>
-          )}
         </div>
       )}
 
-      {kept.length === 0 && alreadyPromoted.length === 0 && (
+      {rejected.size > 0 && (
+        <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+          <h3 className="text-sm font-semibold text-slate-700">
+            Rejected — {rejected.size} question{rejected.size === 1 ? "" : "s"} (not added)
+          </h3>
+          <p className="mt-1 text-[11px] text-slate-500">
+            Still listed above so you can inspect them; press Accept on any of them to change its
+            mind.
+          </p>
+        </div>
+      )}
+
+      {kept.length === 0 && candidates.length > 0 && (
         <p className="rounded-xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">
-          Nothing left — every question was rejected. You can generate again.
+          Nothing is currently accepted — every question was rejected (duplicates arrive rejected by
+          default). Accept any that are genuinely different, or generate again.
         </p>
       )}
 
       {/* ── commit to a Q Set ──────────────────────────────────────────────── */}
-      {outcome ? (
+      {alreadyCommitted || outcome ? (
         <div className="flex items-start gap-2 rounded-xl border border-emerald-300 bg-emerald-50 p-4 text-sm text-emerald-900">
           <CheckCircle2 className="mt-0.5 size-5 shrink-0" />
           <div>
             <p className="font-semibold">
-              {outcome.promoted.length} question{outcome.promoted.length === 1 ? "" : "s"} added to “
-              {outcome.createdSet?.title ?? sets.find((s) => s.id === targetSetId)?.title ??
-                "Q Set"}
-              ”.
+              {outcome
+                ? `${outcome.promoted.length} question${outcome.promoted.length === 1 ? "" : "s"} added to “${
+                    outcome.createdSet?.title ??
+                    sets.find((s) => s.id === targetSetId)?.title ??
+                    "Q Set"
+                  }”.`
+                : `Already added to “${committedSetTitle}”.`}
             </p>
-            {outcome.failed.length > 0 && (
+            {outcome && outcome.failed.length > 0 && (
               <p className="mt-1 text-xs text-amber-800">
                 {outcome.failed.length} could not be added:{" "}
                 {outcome.failed.map((f) => f.reason).join("; ")}
               </p>
             )}
-            <p className="mt-2 text-xs">
-              <a
-                href={`/admin/sets/${outcome.createdSet?.id ?? targetSetId}`}
-                className="font-medium underline underline-offset-2"
-              >
-                Open the Q Set →
-              </a>
-            </p>
+            {(!outcome || commitMode === "new") && (
+              <p className="mt-2 text-xs">
+                <a
+                  href={`/admin/sets/${outcome?.createdSet?.id ?? detail.job.committedSetId}`}
+                  className="font-medium underline underline-offset-2"
+                >
+                  Open the Q Set →
+                </a>{" "}
+                Publish it and the quiz is live immediately.
+              </p>
+            )}
           </div>
         </div>
       ) : (
-        (kept.length > 0 || alreadyPromoted.length > 0) && (
+        kept.length > 0 && (
           <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
             <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
               <Save className="size-4" />
-              Add the entire approved set to a Q Set
+              Add the accepted questions to a Q Set
             </h3>
 
             <div className="flex flex-wrap gap-2">
@@ -600,7 +629,7 @@ export function BatchReview({
                   <select
                     value={newMode}
                     onChange={(e) => setNewMode(e.target.value)}
-                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-900/10"
                   >
                     <option value="practice">Practice</option>
                     <option value="mock">Mock</option>
@@ -611,7 +640,7 @@ export function BatchReview({
                   <select
                     value={newDifficulty}
                     onChange={(e) => setNewDifficulty(e.target.value)}
-                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-900/10"
                   >
                     {["easy", "medium", "hard", "expert", "mixed"].map((d) => (
                       <option key={d} value={d}>
@@ -639,11 +668,22 @@ export function BatchReview({
                 {committing ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
                 {committing
                   ? "Adding…"
-                  : `Add ${kept.length} approved question${kept.length === 1 ? "" : "s"} to Q Set`}
+                  : `Add ${kept.length} question${kept.length === 1 ? "" : "s"} to Q Set`}
               </button>
+              <span className="text-[11px] text-slate-400">
+                Duplicates stay rejected unless you accepted them. Added questions are active
+                immediately — publish the set and they play.
+              </span>
             </div>
           </div>
         )
+      )}
+
+      {!alreadyCommitted && !outcome && kept.length === 0 && candidates.length > 0 && (
+        <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          <AlertCircle className="mt-0.5 size-4 shrink-0" />
+          <span>Keep at least one question to add a batch to a Q Set.</span>
+        </div>
       )}
     </section>
   );

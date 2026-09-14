@@ -15,8 +15,10 @@ export const metadata = { title: "Generate · Admin" };
 /**
  * M10 — the generation screen.
  *
- * Nothing produced here reaches learners. Every candidate lands in the review
- * queue and a human decides (§2.2).
+ * Ask for N questions; duplicates are filtered against the whole bank and any
+ * shortfall is topped up, so what appears here is the fresh set. Commit adds
+ * the kept questions to a Q Set as active questions — publish the set and they
+ * are playable.
  */
 export default async function AdminGeneratePage() {
   const user = await getCurrentPageUser();
@@ -37,16 +39,10 @@ export default async function AdminGeneratePage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Generate questions</h1>
           <p className="mt-1 text-sm text-slate-500">
-            Draft a batch with a model, then review every question before it reaches the bank.
+            Ask for N questions, review the fresh batch, then add it to a Q Set in one click.
           </p>
         </div>
         <div className="flex gap-2">
-          <Link
-            href="/admin/review"
-            className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
-          >
-            Review queue
-          </Link>
           <Link
             href="/admin"
             className="rounded-lg px-3 py-1.5 text-sm font-medium text-slate-500 hover:bg-slate-100"
@@ -90,9 +86,9 @@ export default async function AdminGeneratePage() {
 }
 
 /**
- * M13 — how is each prompt version actually doing? Decisions made by humans,
- * counted against the version that produced the candidates. Pending/deferred
- * are excluded from the denominator so a long queue cannot inflate quality.
+ * How is each prompt version doing? Questions asked vs delivered, and how much
+ * of the model's output was usable (not a duplicate of something already in the
+ * bank). This is the signal for whether a prompt change is an improvement.
  */
 function PromptStats({ stats }: { stats: PromptVersionStats[] }) {
   if (stats.length === 0) {
@@ -102,13 +98,13 @@ function PromptStats({ stats }: { stats: PromptVersionStats[] }) {
       </div>
     );
   }
-  const pct = (n: number | null) => (n === null ? "—" : `${Math.round(n * 100)}%`);
+  const pct = (n: number) => `${Math.round(n * 100)}%`;
   return (
     <section className="rounded-xl border border-slate-200 bg-white p-4">
       <h2 className="text-sm font-semibold text-slate-700">Prompt performance</h2>
       <p className="mt-1 text-xs text-slate-400">
-        Acceptance = approved ÷ (approved + rejected + merged); pending and deferred are not
-        counted against a prompt. Duplicate rate is of produced candidates.
+        Fresh rate = delivered ÷ (delivered + duplicates filtered). A low rate means the model is
+        re-asking facts the bank already covers.
       </p>
       <div className="mt-3 overflow-x-auto">
         <table className="w-full text-left text-xs text-slate-600">
@@ -116,14 +112,10 @@ function PromptStats({ stats }: { stats: PromptVersionStats[] }) {
             <tr>
               <th className="py-2 pr-3 font-medium">Prompt</th>
               <th className="py-2 pr-3 font-medium">Jobs</th>
-              <th className="py-2 pr-3 font-medium">Produced</th>
-              <th className="py-2 pr-3 font-medium">Valid</th>
-              <th className="py-2 pr-3 font-medium">Dupes</th>
-              <th className="py-2 pr-3 font-medium">Approved</th>
-              <th className="py-2 pr-3 font-medium">Rejected</th>
-              <th className="py-2 pr-3 font-medium">Pending</th>
-              <th className="py-2 pr-3 font-medium">Accept</th>
-              <th className="py-2 pr-3 font-medium">Dup rate</th>
+              <th className="py-2 pr-3 font-medium">Asked</th>
+              <th className="py-2 pr-3 font-medium">Delivered</th>
+              <th className="py-2 pr-3 font-medium">Duplicates</th>
+              <th className="py-2 pr-3 font-medium">Fresh rate</th>
             </tr>
           </thead>
           <tbody>
@@ -131,14 +123,10 @@ function PromptStats({ stats }: { stats: PromptVersionStats[] }) {
               <tr key={row.promptVersion} className="border-b border-slate-100">
                 <td className="py-2 pr-3 font-mono text-[11px] text-slate-700">{row.promptVersion}</td>
                 <td className="py-2 pr-3">{row.jobs}</td>
-                <td className="py-2 pr-3">{row.produced}</td>
-                <td className="py-2 pr-3">{row.valid}</td>
-                <td className="py-2 pr-3">{row.duplicates}</td>
-                <td className="py-2 pr-3 text-emerald-600">{row.approved}</td>
-                <td className="py-2 pr-3 text-rose-600">{row.rejected}</td>
-                <td className="py-2 pr-3">{row.pending}</td>
-                <td className="py-2 pr-3 font-semibold text-slate-800">{pct(row.acceptanceRate)}</td>
-                <td className="py-2 pr-3">{pct(row.duplicateRate)}</td>
+                <td className="py-2 pr-3">{row.requested}</td>
+                <td className="py-2 pr-3 text-emerald-600">{row.produced}</td>
+                <td className="py-2 pr-3 text-amber-600">{row.duplicates}</td>
+                <td className="py-2 pr-3 font-semibold text-slate-800">{pct(row.freshRate)}</td>
               </tr>
             ))}
           </tbody>

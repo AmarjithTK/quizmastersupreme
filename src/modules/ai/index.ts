@@ -12,14 +12,13 @@ export {
   listJobs,
   cancelJob,
   listCandidates,
+  listJobCandidates,
   getCandidate,
-  reviewCandidate,
-  bulkReviewCandidates,
-  promoteCandidate,
-  pendingReviewCount,
+  setCandidateRejected,
   promptVersionStats,
-  commitJobCandidates,
   commitJobToSet,
+  MAX_REQUESTED,
+  MAX_BACKFILL_ROUNDS,
   type CommitOutcome,
   type PromptVersionStats,
   type JobProgress,
@@ -29,7 +28,15 @@ export {
   type CandidateWithJob,
 } from "./pipeline";
 
-export { openRouterProvider, stubProvider, estimateCostUsd, LlmError, type LlmProvider, type GenerationRequest, type GenerationResponse } from "./provider";
+export {
+  outputBudgetFor,
+  modelOutputCap,
+  PER_QUESTION_TOKENS,
+  DEFAULT_MODEL_CAP,
+  MIN_OUTPUT_TOKENS,
+} from "./budget";
+
+export { openRouterProvider, stubProvider, estimateCostUsd, DEFAULT_MAX_TOKENS, LlmError, type LlmProvider, type GenerationRequest, type GenerationResponse } from "./provider";
 
 export { configuredProvider, openRouterKeyConfigured, r2RawStorage } from "./adapters";
 

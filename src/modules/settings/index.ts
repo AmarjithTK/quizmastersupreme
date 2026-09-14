@@ -16,36 +16,23 @@ import { appSettings, nowMs } from "@/db/schema";
 import { recordAudit } from "@/modules/audit";
 
 export type DedupeThresholds = {
-  /** Jaccard at or above this is treated as near-identical. */
+  /** Jaccard at or above this is treated as near-identical and auto-filtered. */
   jaccardReject: number;
-  /** Jaccard at or above this (but below reject) needs a human look. */
+  /** Jaccard at or above this (but below reject) is shown as a possible duplicate. */
   jaccardReview: number;
-  /** SimHash Hamming distance treated as "near". */
-  simhashMaxDistance: number;
-  /** Cosine similarity at or above this is a semantic duplicate (M12). */
-  semanticReject: number;
-  /** Cosine at or above this (but below reject) needs a human look (M12). */
-  semanticReview: number;
 };
 
 /**
  * Starting values, measured on the seed corpus rather than guessed.
- * See the band table in modules/dedupe/simhash.ts.
  */
 export const DEDUPE_DEFAULTS: DedupeThresholds = {
   jaccardReject: 0.85,
   jaccardReview: 0.65,
-  simhashMaxDistance: 16,
-  semanticReject: 0.95,
-  semanticReview: 0.85,
 };
 
 const KEYS: Record<keyof DedupeThresholds, string> = {
   jaccardReject: "dedupe.jaccard_reject",
   jaccardReview: "dedupe.jaccard_review",
-  simhashMaxDistance: "dedupe.simhash_max_distance",
-  semanticReject: "dedupe.semantic_reject",
-  semanticReview: "dedupe.semantic_review",
 };
 
 function coerce(key: keyof DedupeThresholds, raw: string): number | null {
@@ -53,8 +40,7 @@ function coerce(key: keyof DedupeThresholds, raw: string): number | null {
     const value = JSON.parse(raw);
     if (typeof value !== "number" || !Number.isFinite(value)) return null;
     // Guard the obviously wrong: a similarity outside 0..1 is a typo.
-    if (key !== "simhashMaxDistance" && (value < 0 || value > 1)) return null;
-    if (key === "simhashMaxDistance" && (value < 0 || value > 64)) return null;
+    if (value < 0 || value > 1) return null;
     return value;
   } catch {
     return null;
@@ -133,9 +119,10 @@ export { KEYS as DEDUPE_SETTING_KEYS };
 export const AI_PROVIDERS = ["openrouter"] as const;
 export type AiProvider = (typeof AI_PROVIDERS)[number];
 
-export const DEFAULT_AI_MODEL = "deepseek/deepseek-v4-flash-0731";
+export const DEFAULT_AI_MODEL = "deepseek/deepseek-v4.1-flash";
 
 export const AI_MODEL_PRESETS = [
+  "deepseek/deepseek-v4.1-flash",
   "deepseek/deepseek-v4-flash-0731",
   "deepseek/deepseek-chat-v3-0324",
   "anthropic/claude-sonnet-4.5",

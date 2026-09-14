@@ -98,7 +98,7 @@ beforeAll(async () => {
         tags: ["dashboard-test"],
       },
       ACTOR,
-      { status: "published" },
+      { status: "active" },
     );
     questionIds.push(question.id);
     await db()

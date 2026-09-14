@@ -38,17 +38,17 @@ export type Difficulty = (typeof DIFFICULTIES)[number];
 export const SET_DIFFICULTIES = ["easy", "medium", "hard", "expert", "mixed"] as const;
 export type SetDifficulty = (typeof SET_DIFFICULTIES)[number];
 
-/** PLAN.md §2.2 — the only path from AI output to published content is human review. */
-export const QUESTION_STATUSES = [
-  "ai_draft",
-  "draft",
-  "review",
-  "approved",
-  "published",
-  "rejected",
-  "duplicate",
-  "archived",
-] as const;
+/**
+ * Question lifecycle — exactly three states (REVAMP-PLAN.md §4).
+ *
+ *   active   — in the bank; playable whenever it is attached to a PUBLISHED set
+ *   rejected — excluded everywhere (includes what used to be "duplicate")
+ *   archived — soft delete
+ *
+ * Playability lives on the SET, not on the question: adding a question to a
+ * published set makes it playable immediately, with no per-question publish step.
+ */
+export const QUESTION_STATUSES = ["active", "rejected", "archived"] as const;
 export type QuestionStatus = (typeof QUESTION_STATUSES)[number];
 
 export const QUESTION_ORIGINS = ["manual", "ai", "import", "seed"] as const;

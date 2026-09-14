@@ -37,8 +37,6 @@ export const TABLE_ORDER = [
   "auditLog",
   "aiGenerationJobs",
   "aiCandidates",
-  "questionEmbeddings",
-  "duplicateFlags",
 ] as const;
 
 type TableName = (typeof TABLE_ORDER)[number];
@@ -60,8 +58,6 @@ const TABLES: Record<TableName, (typeof schema)[TableName]> = {
   auditLog: schema.auditLog,
   aiGenerationJobs: schema.aiGenerationJobs,
   aiCandidates: schema.aiCandidates,
-  questionEmbeddings: schema.questionEmbeddings,
-  duplicateFlags: schema.duplicateFlags,
 };
 
 export type BackupPayload = {

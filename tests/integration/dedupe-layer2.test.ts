@@ -18,10 +18,8 @@ import {
   classifyTextSimilarity,
   contentWords,
   findTextDuplicates,
+  isAutoFiltered,
   jaccard,
-  listDuplicateFlags,
-  resolveDuplicateFlag,
-  sweepExistingQuestions,
 } from "@/modules/dedupe";
 import { createQuestion, type QuestionDraft } from "@/modules/questions";
 
@@ -69,7 +67,6 @@ afterAll(async () => {
 });
 
 async function cleanup(): Promise<void> {
-  await db().delete(schema.duplicateFlags).run();
   await db().delete(schema.questions).where(eq(schema.questions.topic, TOPIC)).run();
 }
 
@@ -104,7 +101,7 @@ describe("classifyTextSimilarity", () => {
     const thresholds = { reject: 0.85, review: 0.65 };
     expect(classifyTextSimilarity(0.95, thresholds)).toBe("near_dup");
     expect(classifyTextSimilarity(0.85, thresholds)).toBe("near_dup");
-    expect(classifyTextSimilarity(0.7, thresholds)).toBe("semantic_dup");
+    expect(classifyTextSimilarity(0.7, thresholds)).toBe("possible_dup");
     expect(classifyTextSimilarity(0.3, thresholds)).toBe("clean");
   });
 });
@@ -114,7 +111,7 @@ describe("classifyTextSimilarity", () => {
 describe("findTextDuplicates", () => {
   it("finds a near-identical question already in the bank", async () => {
     const stem = "Which planet is the largest in the Solar System?";
-    await createQuestion(draft(stem), ACTOR, { status: "published" });
+    await createQuestion(draft(stem), ACTOR, { status: "active" });
 
     const { best } = await findTextDuplicates({
       stem: "Which planet is largest in the Solar System?",
@@ -128,7 +125,7 @@ describe("findTextDuplicates", () => {
 
   it("does not match an unrelated question", async () => {
     await createQuestion(draft("Who composed the M9 dedupe unrelated symphony?"), ACTOR, {
-      status: "published",
+      status: "active",
     });
 
     const { best } = await findTextDuplicates({
@@ -142,7 +139,7 @@ describe("findTextDuplicates", () => {
     const { question } = await createQuestion(
       draft("Which river is the longest in Kerala state?"),
       ACTOR,
-      { status: "published" },
+      { status: "active" },
     );
 
     const { matches } = await findTextDuplicates({
@@ -165,7 +162,7 @@ describe("findTextDuplicates", () => {
 
 describe("checkCandidate with layer 2 active", () => {
   it("auto-rejects an EXACT duplicate at layer 1", async () => {
-    await createQuestion(draft("Which metal has the symbol Au?"), ACTOR, { status: "published" });
+    await createQuestion(draft("Which metal has the symbol Au?"), ACTOR, { status: "active" });
 
     const verdict = await checkCandidate({
       stem: "WHICH METAL HAS THE SYMBOL AU",
@@ -177,9 +174,9 @@ describe("checkCandidate with layer 2 active", () => {
     expect(verdict.autoReject).toBe(true);
   });
 
-  it("FLAGS a near-duplicate at layer 2 but does NOT auto-reject it", async () => {
+  it("classifies a reworded question at layer 2 by similarity band", async () => {
     await createQuestion(draft("Which gas do plants absorb during photosynthesis?"), ACTOR, {
-      status: "published",
+      status: "active",
     });
 
     const verdict = await checkCandidate({
@@ -187,10 +184,11 @@ describe("checkCandidate with layer 2 active", () => {
       optionBodies: ["Zephyr", "Quartz", "Nimbus", "Onyx"],
     });
 
-    // This is the whole point of §13.6: flag for a human, never delete.
+    // Two bands: >= jaccardReject is auto-filtered; the review band only flags.
     expect(verdict.layer).toBe("text");
-    expect(["near_dup", "semantic_dup"]).toContain(verdict.status);
-    expect(verdict.autoReject).toBe(false);
+    expect(["near_dup", "possible_dup"]).toContain(verdict.status);
+    expect(verdict.autoReject).toBe(verdict.status === "near_dup");
+    expect(isAutoFiltered(verdict)).toBe(verdict.status === "near_dup");
     expect(verdict.bestMatch).toBeTruthy();
   });
 
@@ -202,13 +200,11 @@ describe("checkCandidate with layer 2 active", () => {
 
     expect(verdict.status).toBe("clean");
     expect(verdict.autoReject).toBe(false);
-    // Layer 3 has not run yet, and the verdict says so rather than implying
-    // the question was checked three times.
-    expect(verdict.degraded).toContain("semantic");
+    expect(isAutoFiltered(verdict)).toBe(false);
   });
 
   it("stops flagging a merely same-topic question as a duplicate", async () => {
-    await createQuestion(draft("Who created the Linux kernel?"), ACTOR, { status: "published" });
+    await createQuestion(draft("Who created the Linux kernel?"), ACTOR, { status: "active" });
 
     const verdict = await checkCandidate({
       stem: "In which year was the Linux kernel first released?",
@@ -232,57 +228,5 @@ describe("checkCandidate with layer 2 active", () => {
 
   it("returns an empty array for an empty batch", async () => {
     expect(await checkCandidates([])).toEqual([]);
-  });
-});
-
-// ── the retroactive sweep ────────────────────────────────────────────────────
-
-describe("sweepExistingQuestions", () => {
-  it("flags an existing near-duplicate pair and is idempotent", async () => {
-    await cleanup();
-    await createQuestion(draft("Which ocean is the deepest on planet Earth?"), ACTOR, {
-      status: "published",
-    });
-    await createQuestion(draft("Which ocean is deepest on planet Earth?"), ACTOR, {
-      status: "published",
-    });
-
-    const first = await sweepExistingQuestions({ limit: 50, actorId: ACTOR });
-    expect(first.scanned).toBeGreaterThan(0);
-
-    const flags = await listDuplicateFlags({ status: "open" });
-    const relevant = flags.filter(
-      (f) => f.questionStem.includes("ocean") || f.matchedStem.includes("ocean"),
-    );
-    expect(relevant.length).toBeGreaterThan(0);
-
-    // Canonical order: the lower id is always stored first.
-    for (const flag of relevant) {
-      expect(flag.questionId < flag.matchedQuestionId).toBe(true);
-    }
-
-    // Running it again must not duplicate the flags.
-    const before = (await listDuplicateFlags({ status: "open" })).length;
-    await sweepExistingQuestions({ limit: 50, actorId: ACTOR });
-    const after = (await listDuplicateFlags({ status: "open" })).length;
-    expect(after).toBe(before);
-  });
-
-  it("resolves a flag without touching the questions", async () => {
-    const flags = await listDuplicateFlags({ status: "open" });
-    if (flags.length === 0) return;
-
-    const flag = flags[0]!;
-    await resolveDuplicateFlag(flag.id, "dismissed", ACTOR);
-
-    const open = await listDuplicateFlags({ status: "open" });
-    expect(open.map((f) => f.id)).not.toContain(flag.id);
-
-    // Both questions still exist — resolving a flag is a decision, not a delete.
-    const rows = await db()
-      .select({ id: schema.questions.id })
-      .from(schema.questions)
-      .where(eq(schema.questions.id, flag.questionId));
-    expect(rows).toHaveLength(1);
   });
 });

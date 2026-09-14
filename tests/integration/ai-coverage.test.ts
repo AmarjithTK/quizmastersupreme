@@ -71,7 +71,7 @@ beforeAll(async () => {
   ];
 
   for (const [stem, answer] of facts) {
-    await createQuestion(draft(stem, answer), ACTOR, { status: "published" });
+    await createQuestion(draft(stem, answer), ACTOR, { status: "active" });
   }
 
   // Two decoys. Each shares ONE word with the queries below, which is exactly
@@ -79,12 +79,12 @@ beforeAll(async () => {
   await createQuestion(
     draft("Who wrote the Minix kernel?", "Andrew Tanenbaum", NOISE_TOPIC),
     ACTOR,
-    { status: "published" },
+    { status: "active" },
   );
   await createQuestion(
     draft("Which company maintains Linux Mint?", "Clem Lefebvre", NOISE_TOPIC),
     ACTOR,
-    { status: "published" },
+    { status: "active" },
   );
 });
 
@@ -179,7 +179,7 @@ describe("buildCoverageDigest", () => {
   it("deduplicates near-identical concepts", async () => {
     // A second question with the same subject+answer must not add a line.
     await createQuestion(draft("Who created the Linux kernel?", "Linus Torvalds"), ACTOR, {
-      status: "published",
+      status: "active",
     }).catch(() => undefined);
 
     const digest = await buildCoverageDigest({ topic: TOPIC });

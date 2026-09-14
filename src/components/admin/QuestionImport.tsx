@@ -55,7 +55,7 @@ export function QuestionImport({
 }) {
   const [csv, setCsv] = useState("");
   const [fileName, setFileName] = useState<string | null>(null);
-  const [status, setStatus] = useState("draft");
+  const [status, setStatus] = useState("active");
   const [report, setReport] = useState<ImportReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -153,10 +153,8 @@ export function QuestionImport({
             onChange={(e) => setStatus(e.target.value)}
             className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
           >
-            <option value="draft">Draft</option>
-            <option value="review">Review</option>
-            <option value="approved">Approved</option>
-            <option value="published">Published</option>
+            <option value="active">Active</option>
+            <option value="archived">Archived</option>
           </select>
         </label>
 

@@ -27,8 +27,7 @@ import {
 } from "@/db/schema";
 import { ApiError, notFound, validationError } from "@/lib/errors";
 import { recordAudit } from "@/modules/audit";
-import { checkCandidate, type SemanticDedupe } from "@/modules/dedupe";
-import { simhashHex } from "@/modules/dedupe/simhash";
+import { checkCandidate } from "@/modules/dedupe";
 import { normalizeStem } from "./normalize";
 import {
   validateQuestion,
@@ -42,16 +41,7 @@ export type QuestionWriteResult = {
 };
 
 /** Drizzle column types are `string` even with CHECK constraints. */
-const QUESTION_STATUSES: readonly QuestionStatus[] = [
-  "ai_draft",
-  "draft",
-  "review",
-  "approved",
-  "published",
-  "rejected",
-  "duplicate",
-  "archived",
-];
+const QUESTION_STATUSES: readonly QuestionStatus[] = ["active", "rejected", "archived"];
 
 /**
  * Ceiling on how many FTS hits feed a filtered query.
@@ -237,16 +227,19 @@ export async function listQuestionsForAdmin(
 // ── write paths ──────────────────────────────────────────────────────────────
 
 export type CreateQuestionOptions = {
+  /** Defaults to `active`: a question in the bank is playable once attached. */
   status?: QuestionStatus;
   origin?: "manual" | "ai" | "import" | "seed";
   createdBy?: string | null;
   generationJobId?: string | null;
   /**
-   * Layer 3 dependencies. Supplied by the edge route when the Workers AI and
-   * Vectorize bindings exist; absent means layer 3 is skipped and reported as
-   * degraded rather than assumed clean.
+   * Explicit human override of the duplicate gate.
+   *
+   * Used ONLY when an admin reviews an AI batch, sees a candidate flagged as a
+   * duplicate, and deliberately accepts it anyway. The hashes are still computed
+   * and stored; only the throw is skipped. Never set this on a normal write path.
    */
-  semantic?: SemanticDedupe | null;
+  allowDuplicate?: boolean;
 };
 
 function assertValid(draft: QuestionDraft): { warnings: ValidationIssue[]; language: string } {
@@ -261,24 +254,24 @@ function assertValid(draft: QuestionDraft): { warnings: ValidationIssue[]; langu
 }
 
 /**
- * Layer-1 duplicate gate. Returns the verdict so the caller can reuse the
- * computed hashes instead of hashing the same draft twice.
+ * Duplicate gate. Returns the verdict so the caller can reuse the computed
+ * hashes instead of hashing the same draft twice.
+ *
+ * `allowDuplicate` is the reviewed-batch override: the verdict is still computed
+ * (and its hashes reused) but an exact/near match no longer blocks the insert.
  */
 async function guardDuplicate(
   draft: QuestionDraft,
   excludeQuestionId?: string,
-  semantic?: SemanticDedupe | null,
+  allowDuplicate = false,
 ) {
-  const verdict = await checkCandidate(
-    {
-      stem: draft.stem,
-      optionBodies: draft.options.map((o) => o.body),
-      excludeQuestionId,
-    },
-    { semantic },
-  );
+  const verdict = await checkCandidate({
+    stem: draft.stem,
+    optionBodies: draft.options.map((o) => o.body),
+    excludeQuestionId,
+  });
 
-  if (verdict.autoReject && verdict.bestMatch) {
+  if (!allowDuplicate && verdict.autoReject && verdict.bestMatch) {
     throw new ApiError("DUPLICATE", "This question already exists in the bank.", {
       matchedQuestionId: verdict.bestMatch.questionId,
       matchedStem: verdict.bestMatch.stem,
@@ -311,10 +304,9 @@ function questionRow(
     sourceUrl: draft.sourceUrl?.trim() || null,
     examBody: draft.examBody?.trim() || null,
     language,
-    status: options.status ?? "draft",
+    status: options.status ?? "active",
     normalizedHash: hashes.normalizedHash,
     contentHash: hashes.contentHash,
-    simhash: simhashHex(draft.stem),
     origin: options.origin ?? "manual",
     createdBy: options.createdBy ?? null,
     generationJobId: options.generationJobId ?? null,
@@ -342,7 +334,7 @@ export async function createQuestion(
   options: CreateQuestionOptions = {},
 ): Promise<QuestionWriteResult> {
   const { warnings, language } = assertValid(draft);
-  const verdict = await guardDuplicate(draft, undefined, options.semantic);
+  const verdict = await guardDuplicate(draft, undefined, options.allowDuplicate);
 
   const now = nowMs();
   const row = questionRow(
@@ -371,7 +363,6 @@ export async function updateQuestion(
   id: string,
   patch: Partial<QuestionDraft>,
   actorId: string,
-  options: { semantic?: SemanticDedupe | null } = {},
 ): Promise<QuestionWriteResult> {
   const existing = await getQuestionForAdmin(id);
 
@@ -401,7 +392,7 @@ export async function updateQuestion(
   };
 
   const { warnings, language } = assertValid(draft);
-  const verdict = await guardDuplicate(draft, id, options.semantic);
+  const verdict = await guardDuplicate(draft, id);
   const now = nowMs();
 
   await db().batch([
@@ -421,7 +412,6 @@ export async function updateQuestion(
         language,
         normalizedHash: verdict.normalizedHash,
         contentHash: verdict.contentHash,
-        simhash: simhashHex(draft.stem),
         updatedAt: now,
       })
       .where(eq(questions.id, id)),
@@ -451,7 +441,7 @@ export async function setQuestionStatus(
   const now = nowMs();
   // Approving or publishing records WHO vouched for it — that is the whole
   // point of the review queue (§2.2).
-  const approving = status === "approved" || status === "published";
+  const approving = status === "active";
 
   await db()
     .update(questions)
@@ -508,7 +498,7 @@ export async function bulkSetQuestionStatus(
     for (const row of rows) existing.add(row.id);
   }
 
-  const approving = status === "approved" || status === "published";
+  const approving = status === "active";
   const now = nowMs();
   const targets = unique.filter((id) => existing.has(id));
 

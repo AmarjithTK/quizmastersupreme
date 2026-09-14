@@ -122,9 +122,9 @@ describe("createQuestion funnel", () => {
 
     expect(loaded.options).toHaveLength(4);
     expect(loaded.options.find((o) => o.isCorrect === 1)?.key).toBe("B");
-    expect(loaded.status).toBe("draft");
+    expect(loaded.status).toBe("active");
     expect(loaded.normalizedHash).toMatch(/^[0-9a-f]{64}$/);
-    expect(loaded.simhash).toMatch(/^[0-9a-f]{16}$/);
+    expect(loaded.contentHash).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it("rejects a question with only three options", async () => {
@@ -247,20 +247,21 @@ describe("updateQuestion", () => {
 });
 
 describe("setQuestionStatus", () => {
-  it("stamps approvedBy and approvedAt on first approval", async () => {
+  it("stamps approvedBy and approvedAt on first activation", async () => {
     const { question } = await createQuestion(draft({ stem: "Approval stamping question?" }), ACTOR);
     expect(question.approvedAt).toBeNull();
 
-    const approved = await setQuestionStatus(question.id, "approved", ACTOR);
-    expect(approved.status).toBe("approved");
-    expect(approved.approvedBy).toBe(ACTOR);
-    expect(approved.approvedAt).not.toBeNull();
+    const active = await setQuestionStatus(question.id, "active", ACTOR);
+    expect(active.status).toBe("active");
+    expect(active.approvedBy).toBe(ACTOR);
+    expect(active.approvedAt).not.toBeNull();
 
-    const firstStamp = approved.approvedAt;
-    const published = await setQuestionStatus(question.id, "published", ACTOR);
-    expect(published.status).toBe("published");
+    const firstStamp = active.approvedAt;
+    const rejected = await setQuestionStatus(question.id, "rejected", ACTOR);
+    expect(rejected.status).toBe("rejected");
+    const restored = await setQuestionStatus(question.id, "active", ACTOR);
     // Original approval time survives later transitions.
-    expect(published.approvedAt).toBe(firstStamp);
+    expect(restored.approvedAt).toBe(firstStamp);
   });
 
   it("rejects an unknown status", async () => {
@@ -363,14 +364,14 @@ describe("bulk operations report accurate counts", () => {
 
     // D1's meta.changes counts index writes too — updating ONE question with
     // six indexes reported "7" before this was fixed, so assert exact numbers.
-    const two = await bulkSetQuestionStatus(created, "published", ACTOR);
+    const two = await bulkSetQuestionStatus(created, "rejected", ACTOR);
     expect(two.updated).toBe(2);
     expect(two.failed).toEqual([]);
 
-    const one = await bulkSetQuestionStatus([created[0]!], "draft", ACTOR);
+    const one = await bulkSetQuestionStatus([created[0]!], "active", ACTOR);
     expect(one.updated).toBe(1);
 
-    const withFake = await bulkSetQuestionStatus([created[0]!, "no-such-id"], "draft", ACTOR);
+    const withFake = await bulkSetQuestionStatus([created[0]!, "no-such-id"], "archived", ACTOR);
     expect(withFake.updated).toBe(1);
     expect(withFake.failed).toHaveLength(1);
     expect(withFake.failed[0]!.id).toBe("no-such-id");

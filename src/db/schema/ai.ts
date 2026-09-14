@@ -1,16 +1,21 @@
 /**
- * AI generation jobs and their candidate questions.
- * PLAN.md §12.
+ * AI generation jobs and their working set of candidates.
+ * REVAMP-PLAN.md §3 / §5.
  *
- * HARD RULE (§2.2): nothing in this module writes to `questions`. Candidates
- * become questions only through `modules/questions.createQuestion()`, after a
- * human approves them. There is no auto-approve path.
+ * FLOW: a job calls the model in bounded rounds (one call per request) until it
+ * has `requested_count` FRESH questions — duplicates are filtered out against
+ * the whole bank as they arrive, and a backfill round asks for the shortfall.
+ * The survivors are stored in `ai_candidates` as a plain working set, and the
+ * batch screen either rejects individual rows or commits the kept set straight
+ * into the question bank (`status = 'active'`, immediately playable).
+ *
+ * There is no candidate state machine any more: `rejected` is a boolean the
+ * reviewer toggles, and everything else is either stored or was never stored.
  */
 
 import { sql } from "drizzle-orm";
 import { check, index, integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 import { categories, quizSets } from "./content";
-import { questions } from "./questions";
 
 export const aiGenerationJobs = sqliteTable(
   "ai_generation_jobs",
@@ -59,9 +64,16 @@ export const aiGenerationJobs = sqliteTable(
     includeExamples: integer("include_examples").notNull().default(0),
 
     status: text("status").notNull().default("queued"),
+    /** Fresh questions produced so far (the working-set size). */
     producedCount: integer("produced_count").notNull().default(0),
+    /** Same as produced for the revamp; kept for the UI's existing columns. */
     validCount: integer("valid_count").notNull().default(0),
+    /** Duplicates auto-filtered against the bank (never stored). */
     duplicateCount: integer("duplicate_count").notNull().default(0),
+    /** Backfill rounds already run (one model call each). */
+    backfillRound: integer("backfill_round").notNull().default(0),
+    /** Duplicates dropped by the insert-time bank check as well. */
+    duplicateSkipped: integer("duplicate_skipped").notNull().default(0),
 
     promptTokens: integer("prompt_tokens"),
     completionTokens: integer("completion_tokens"),
@@ -93,6 +105,7 @@ export const aiCandidates = sqliteTable(
     jobId: text("job_id")
       .notNull()
       .references(() => aiGenerationJobs.id, { onDelete: "cascade" }),
+    /** Position in the job's output, so batch order is stable. */
     batchIndex: integer("batch_index"),
 
     stem: text("stem").notNull(),
@@ -105,43 +118,31 @@ export const aiCandidates = sqliteTable(
     topic: text("topic"),
     tags: text("tags"),
 
-    validationStatus: text("validation_status").notNull().default("pending"),
-    /** JSON array of readable reasons — invalid candidates are surfaced, never dropped. */
-    validationErrors: text("validation_errors"),
+    /**
+     * The reviewer's decision. Defaults to 1 for anything the dedupe funnel
+     * flagged, so a duplicate arrives rejected-by-default but visible and
+     * overridable. 0 = eligible to commit.
+     */
+    rejected: integer("rejected").notNull().default(0),
 
-    dedupeStatus: text("dedupe_status").notNull().default("pending"),
-    dedupeLayer: text("dedupe_layer"),
-    dedupeBestMatchId: text("dedupe_best_match_id").references(() => questions.id, {
-      onDelete: "set null",
-    }),
+    // ── Why it was flagged (0006) ─────────────────────────────────────────
+    /** 'clean' | 'exact_dup' | 'near_dup' | 'possible_dup'. App-validated. */
+    dedupeStatus: text("dedupe_status").notNull().default("clean"),
+    /** The bank question this duplicates, when the match is in the bank. */
+    dedupeMatchedQuestionId: text("dedupe_matched_question_id"),
+    /** Snapshot of the matched stem (bank question OR an earlier batch mate). */
+    dedupeMatchedStem: text("dedupe_matched_stem"),
     dedupeSimilarity: real("dedupe_similarity"),
-    dedupeDetail: text("dedupe_detail"),
-
-    normalizedHash: text("normalized_hash"),
-    simhash: text("simhash"),
-
-    reviewStatus: text("review_status").notNull().default("pending"),
-    reviewedBy: text("reviewed_by"),
-    reviewedAt: integer("reviewed_at"),
-    reviewNote: text("review_note"),
-    promotedQuestionId: text("promoted_question_id").references(() => questions.id, {
-      onDelete: "set null",
-    }),
+    /** Human-readable explanation shown in the review UI. */
+    dedupeReason: text("dedupe_reason"),
 
     createdAt: integer("created_at").notNull(),
   },
   (t) => [
-    index("ix_candidates_job").on(t.jobId, t.reviewStatus),
-    index("ix_candidates_review").on(t.reviewStatus, t.createdAt),
-    check("ck_candidates_validation", sql`${t.validationStatus} in ('pending','valid','invalid')`),
-    check(
-      "ck_candidates_dedupe",
-      sql`${t.dedupeStatus} in ('pending','clean','exact_dup','near_dup','semantic_dup','error')`,
-    ),
-    check(
-      "ck_candidates_review",
-      sql`${t.reviewStatus} in ('pending','approved','rejected','merged','deferred')`,
-    ),
+    index("ix_candidates_job").on(t.jobId, t.rejected),
+    index("ix_candidates_created").on(t.createdAt),
+    check("ck_candidates_correct_key", sql`${t.correctOptionKey} in ('A','B','C','D','E')`),
+    check("ck_candidates_rejected", sql`${t.rejected} in (0,1)`),
   ],
 );
 

@@ -103,7 +103,7 @@ describe("§2.1 two-level content model", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("schema inventory", () => {
-  it("creates all 18 application tables", async () => {
+  it("creates all 16 application tables", async () => {
     const rows = await allRows<{ name: string }>(
       db,
       `SELECT name FROM sqlite_master
@@ -115,7 +115,7 @@ describe("schema inventory", () => {
        ORDER BY name`,
     );
     const names = rows.map((r) => r.name);
-    expect(names).toHaveLength(18);
+    expect(names).toHaveLength(16);
     expect(names).toEqual(
       expect.arrayContaining([
         "users",
@@ -132,8 +132,6 @@ describe("schema inventory", () => {
         "user_set_stats",
         "ai_generation_jobs",
         "ai_candidates",
-        "duplicate_flags",
-        "question_embeddings",
         "audit_log",
         "app_settings",
       ]),
@@ -177,7 +175,7 @@ describe("§6.3 FTS5", () => {
         `INSERT INTO questions
          (id, stem, stem_format, difficulty, topic, language, status,
           normalized_hash, content_hash, origin, created_at, updated_at)
-         VALUES (?, ?, 'markdown', 'easy', 'Testing', 'en', 'published', ?, ?, 'manual', ?, ?)`,
+         VALUES (?, ?, 'markdown', 'easy', 'Testing', 'en', 'active', ?, ?, 'manual', ?, ?)`,
       )
       .bind(QID, "Which planet is known as the Red Planet?", HASH, HASH, NOW, NOW)
       .run();
@@ -230,7 +228,7 @@ describe("§6.4 one correct option per question", () => {
         `INSERT OR REPLACE INTO questions
          (id, stem, stem_format, difficulty, language, status,
           normalized_hash, content_hash, origin, created_at, updated_at)
-         VALUES (?, 'Pick exactly one', 'markdown', 'easy', 'en', 'draft', ?, ?, 'manual', ?, ?)`,
+         VALUES (?, 'Pick exactly one', 'markdown', 'easy', 'en', 'active', ?, ?, 'manual', ?, ?)`,
       )
       .bind(QID, hash, hash, NOW, NOW)
       .run();
@@ -400,7 +398,7 @@ describe("§2.5 idempotent answers", () => {
         `INSERT OR REPLACE INTO questions
          (id, stem, stem_format, difficulty, language, status,
           normalized_hash, content_hash, origin, created_at, updated_at)
-         VALUES (?, 'Idempotency probe', 'markdown', 'easy', 'en', 'draft', ?, ?, 'manual', ?, ?)`,
+         VALUES (?, 'Idempotency probe', 'markdown', 'easy', 'en', 'active', ?, ?, 'manual', ?, ?)`,
       )
       .bind(QID, hash, hash, NOW, NOW)
       .run();
@@ -472,31 +470,24 @@ describe("§2.5 idempotent answers", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("storage invariants", () => {
-  it("duplicate_flags refuses to flag a question against itself", async () => {
+  it("rejects a retired question status", async () => {
     const hash = "2".repeat(64);
-    const QID = "q__selfdup";
-    await db
-      .prepare(
-        `INSERT OR REPLACE INTO questions
-         (id, stem, stem_format, difficulty, language, status,
-          normalized_hash, content_hash, origin, created_at, updated_at)
-         VALUES (?, 'Self duplicate check', 'markdown', 'easy', 'en', 'draft', ?, ?, 'manual', ?, ?)`,
-      )
-      .bind(QID, hash, hash, NOW, NOW)
-      .run();
-
+    const QID = "q__legacy_status";
+    // `published` was one of the eight pre-revamp statuses; the CHECK now
+    // accepts only active/rejected/archived.
     const error = await expectRejected(
       db,
-      `INSERT INTO duplicate_flags
-       (id, question_id, matched_question_id, layer, similarity, status, created_at)
-       VALUES ('df__self', ?, ?, 'exact', 1.0, 'open', ?)`,
+      `INSERT INTO questions
+       (id, stem, stem_format, difficulty, language, status,
+        normalized_hash, content_hash, origin, created_at, updated_at)
+       VALUES (?, 'Legacy status probe', 'markdown', 'easy', 'en', 'published', ?, ?, 'manual', ?, ?)`,
       QID,
-      QID,
+      hash,
+      hash,
+      NOW,
       NOW,
     );
     expect(error).not.toBeNull();
-
-    await db.prepare(`DELETE FROM questions WHERE id = ?`).bind(QID).run();
   });
 
   it("enforces the (category_id, slug) uniqueness on quiz_sets", async () => {

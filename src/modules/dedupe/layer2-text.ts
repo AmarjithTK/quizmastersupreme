@@ -138,8 +138,8 @@ export async function findTextDuplicates(input: {
 export function classifyTextSimilarity(
   similarity: number,
   thresholds: { reject: number; review: number },
-): "clean" | "near_dup" | "semantic_dup" {
+): "clean" | "near_dup" | "possible_dup" {
   if (similarity >= thresholds.reject) return "near_dup";
-  if (similarity >= thresholds.review) return "semantic_dup";
+  if (similarity >= thresholds.review) return "possible_dup";
   return "clean";
 }

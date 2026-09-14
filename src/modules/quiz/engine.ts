@@ -177,8 +177,9 @@ async function loadSetQuestionIds(setId: string): Promise<string[]> {
     .select({ id: questionSetQuestions.questionId })
     .from(questionSetQuestions)
     .innerJoin(questions, eq(questions.id, questionSetQuestions.questionId))
-    // Only published questions are playable.
-    .where(and(eq(questionSetQuestions.setId, setId), eq(questions.status, "published")))
+    // Playability lives on the SET, not the question: anything active that is
+    // attached to this (published) set is playable. Rejected/archived excluded.
+    .where(and(eq(questionSetQuestions.setId, setId), eq(questions.status, "active")))
     .orderBy(questionSetQuestions.sortOrder);
   return rows.map((r) => r.id);
 }
@@ -311,7 +312,7 @@ export async function startOrResumeAttempt(
 
   const available = await loadSetQuestionIds(setId);
   if (available.length === 0) {
-    throw conflict("This set has no published questions yet.");
+    throw conflict("This set has no questions yet.");
   }
 
   const limited =

@@ -26,7 +26,6 @@ import { eq } from "drizzle-orm";
 import { getPlatformProxy } from "wrangler";
 import * as schema from "../src/db/schema/index";
 import { computeDedupeHashes } from "../src/modules/questions/normalize";
-import { simhashHex } from "../src/modules/dedupe/simhash";
 
 // ── Types for the seed JSON ─────────────────────────────────────────────────
 
@@ -225,10 +224,9 @@ async function main() {
       source: q.source ?? null,
       examBody: q.examBody ?? null,
       language: "en",
-      status: "published",
+      status: "active",
       normalizedHash,
       contentHash,
-      simhash: simhashHex(q.stem),
       origin: "seed",
       approvedAt: now,
       createdAt: now,

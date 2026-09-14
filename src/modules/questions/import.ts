@@ -23,8 +23,7 @@ import {
   type QuestionStatus,
 } from "@/db/schema";
 import { recordAudit } from "@/modules/audit";
-import { checkCandidates, type SemanticDedupe } from "@/modules/dedupe";
-import { simhashHex } from "@/modules/dedupe/simhash";
+import { checkCandidates } from "@/modules/dedupe";
 import { parseCsv, rowsToObjects } from "./csv";
 import { computeDedupeHashes } from "./normalize";
 import { validateQuestion, type QuestionDraft } from "./validation";
@@ -119,9 +118,9 @@ async function chunked<T>(
 export async function importQuestions(
   csvText: string,
   actorId: string,
-  options: { status?: QuestionStatus; dryRun?: boolean; semantic?: SemanticDedupe | null } = {},
+  options: { status?: QuestionStatus; dryRun?: boolean } = {},
 ): Promise<ImportReport> {
-  const status = options.status ?? "draft";
+  const status = options.status ?? "active";
   const dryRun = options.dryRun ?? false;
 
   const { records } = rowsToObjects(parseCsv(csvText));
@@ -193,7 +192,6 @@ export async function importQuestions(
       stem: candidate.draft.stem,
       optionBodies: candidate.draft.options.map((o) => o.body),
     })),
-    { semantic: options.semantic },
   );
 
   const toInsert: Candidate[] = [];
@@ -243,12 +241,11 @@ export async function importQuestions(
         status,
         normalizedHash: candidate.hashes!.normalizedHash,
         contentHash: candidate.hashes!.contentHash,
-        simhash: simhashHex(candidate.draft.stem),
         origin: "import" as const,
         createdBy: actorId,
         generationJobId: null,
-        approvedBy: status === "published" || status === "approved" ? actorId : null,
-        approvedAt: status === "published" || status === "approved" ? now : null,
+        approvedBy: status === "active" ? actorId : null,
+        approvedAt: status === "active" ? now : null,
         createdAt: now,
         updatedAt: now,
       };

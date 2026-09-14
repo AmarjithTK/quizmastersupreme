@@ -47,7 +47,7 @@ beforeAll(async () => {
   });
   setDbForTests(drizzle(proxy.env.DB, { schema }));
   await db().delete(schema.questions).where(eq(schema.questions.topic, TOPIC));
-  await createQuestion(draft, ACTOR, { status: "published" });
+  await createQuestion(draft, ACTOR, { status: "active" });
 });
 
 afterAll(async () => {
