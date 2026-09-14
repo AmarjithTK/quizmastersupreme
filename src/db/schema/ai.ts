@@ -75,6 +75,20 @@ export const aiGenerationJobs = sqliteTable(
     /** Duplicates dropped by the insert-time bank check as well. */
     duplicateSkipped: integer("duplicate_skipped").notNull().default(0),
 
+    // ── P0: small-batch generation loop (0007) ────────────────────────────
+    /** THE target: how many clean (unflagged) questions the job is driving for. */
+    acceptedCount: integer("accepted_count").notNull().default(0),
+    /** Questions asked per internal call (default 25, editable 5–50). */
+    batchSize: integer("batch_size").notNull().default(25),
+    /** Hard cap on provider calls, so refills can never run away. */
+    maxCalls: integer("max_calls").notNull().default(20),
+    /** JSON: compact concept keys accepted so far, fed to later batches. */
+    coveredConcepts: text("covered_concepts"),
+    /** JSON (P2): grounded extracts + citations + user sources. */
+    sourcePool: text("source_pool"),
+    groundingCostUsd: real("grounding_cost_usd"),
+    groundingCached: integer("grounding_cached").notNull().default(0),
+
     promptTokens: integer("prompt_tokens"),
     completionTokens: integer("completion_tokens"),
     costUsd: real("cost_usd"),
@@ -98,6 +112,50 @@ export const aiGenerationJobs = sqliteTable(
   ],
 );
 
+/**
+ * One row per INTERNAL generation call (PIPELINE-PLAN.md §4).
+ *
+ * A job is many of these. Keeping them separate is what makes a weak or failed
+ * batch a local problem: it can be regenerated on its own, and its tokens/cost
+ * are accounted for on their own.
+ */
+export const aiGenerationBatches = sqliteTable(
+  "ai_generation_batches",
+  {
+    id: text("id").primaryKey(),
+    jobId: text("job_id")
+      .notNull()
+      .references(() => aiGenerationJobs.id, { onDelete: "cascade" }),
+    /** 1-based position in the job's call sequence. */
+    batchNo: integer("batch_no").notNull(),
+    status: text("status").notNull().default("running"),
+    /** How many questions this call asked for. */
+    asked: integer("asked").notNull().default(0),
+    /** Valid questions stored (includes flagged duplicates). */
+    produced: integer("produced").notNull().default(0),
+    /** Clean questions that counted toward the target. */
+    accepted: integer("accepted").notNull().default(0),
+    /** Questions stored but rejected by default (duplicates). */
+    flagged: integer("flagged").notNull().default(0),
+    promptTokens: integer("prompt_tokens"),
+    completionTokens: integer("completion_tokens"),
+    costUsd: real("cost_usd"),
+    durationMs: integer("duration_ms"),
+    rawResponseKey: text("raw_response_key"),
+    errorCode: text("error_code"),
+    errorMessage: text("error_message"),
+    startedAt: integer("started_at").notNull(),
+    finishedAt: integer("finished_at"),
+  },
+  (t) => [
+    index("ix_batches_job").on(t.jobId, t.batchNo),
+    check(
+      "ck_batches_status",
+      sql`${t.status} in ('running','succeeded','failed','superseded')`,
+    ),
+  ],
+);
+
 export const aiCandidates = sqliteTable(
   "ai_candidates",
   {
@@ -107,6 +165,10 @@ export const aiCandidates = sqliteTable(
       .references(() => aiGenerationJobs.id, { onDelete: "cascade" }),
     /** Position in the job's output, so batch order is stable. */
     batchIndex: integer("batch_index"),
+    /** Which internal call produced it (see ai_generation_batches.batch_no). */
+    batchNo: integer("batch_no"),
+    /** 1 when a per-batch regenerate replaced it: audited, never committed. */
+    superseded: integer("superseded").notNull().default(0),
 
     stem: text("stem").notNull(),
     /** JSON: [{ key, body }] */
@@ -148,5 +210,7 @@ export const aiCandidates = sqliteTable(
 
 export type AiGenerationJob = typeof aiGenerationJobs.$inferSelect;
 export type NewAiGenerationJob = typeof aiGenerationJobs.$inferInsert;
+export type AiGenerationBatch = typeof aiGenerationBatches.$inferSelect;
+export type NewAiGenerationBatch = typeof aiGenerationBatches.$inferInsert;
 export type AiCandidate = typeof aiCandidates.$inferSelect;
 export type NewAiCandidate = typeof aiCandidates.$inferInsert;

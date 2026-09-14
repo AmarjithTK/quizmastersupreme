@@ -7,8 +7,10 @@ generating fresh questions with AI.
 **The revamp (2026-09) simplified the content pipeline.** [`REVAMP-PLAN.md`](./REVAMP-PLAN.md)
 is the record: question statuses collapsed 8 → 3 (`active`/`rejected`/`archived`),
 playability is derived from set membership (no per-question publish step), generation
-asks for N and gets N (duplicates auto-filtered, shortfall backfilled), and the review
-queue, duplicate triage and vector-index machinery were removed. Where `PLAN.md`'s
+runs in small internal batches (default 25) that are filtered and refilled until the
+target is met, and the review queue, duplicate triage and vector-index machinery were
+removed. Duplicates are **shown, rejected by default, with
+the existing question they matched** — so the reviewer can inspect and override them. Where `PLAN.md`'s
 "frozen constraints" disagree with the code, the revamp wins.
 
 **Read [`PLAN.md`](./PLAN.md) for the original design.** Every schema change is tracked in
@@ -23,7 +25,7 @@ queue, duplicate triage and vector-index machinery were removed. Where `PLAN.md`
 | Database | **Cloudflare D1** (SQLite) — identical engine locally and in production |
 | ORM | Drizzle ORM + Drizzle Kit |
 | Search | D1 **FTS5** (virtual table + triggers) |
-| Dedupe | Exact hash (L1) → FTS5 + Jaccard (L2), auto-filtering at write time |
+| Dedupe | Exact hash (L1) → FTS5 + Jaccard (L2), at write time; duplicates flagged, not hidden |
 | AI generation | OpenRouter behind a transport-agnostic pipeline; count-sized output budget + backfill rounds |
 | Tests | Vitest (unit) + real local D1 (integration) — **259 tests** |
 
@@ -32,14 +34,16 @@ queue, duplicate triage and vector-index machinery were removed. Where `PLAN.md`
 **M0–M14 implemented, then simplified by the revamp — all verified locally.**
 See `PLAN.md` §0.1 for the as-built status and §20 for the roadmap. Highlights:
 
-- ✅ Full schema with migrations (16 tables), FTS5, CHECK / partial-unique constraints
+- ✅ Full schema with migrations (17 tables), FTS5, CHECK / partial-unique constraints
 - ✅ Google-only auth (OIDC + PKCE), D1 sessions, admin role gate
 - ✅ Admin: categories, quiz sets, questions, set membership — CRUD with validation + audit trail
 - ✅ The question funnel: validate → normalize → dedupe (layers 1–2) → insert on every write path
 - ✅ Quiz runner (timed mock exams, resume, server-owned clock), results, history, dashboard, search
 - ✅ CSV import/export with dry run, bulk status changes
-- ✅ AI generation: ask for N, get N — count-sized output budget, backfill rounds, duplicates
-  auto-filtered against the whole bank, coverage-aware prompts, one-click add-to-set
+- ✅ AI generation: a target count runs as small batches (25/call, editable) that are each
+  filtered against the whole bank and refilled until the target is met; duplicates are shown,
+  rejected by default and overridable; coverage-aware prompts; one-click add-to-set; the
+  batch review opens itself when a run finishes
 - ✅ M14 hardening: rate limits, error boundaries, backup/restore (rehearsed by test), staging config,
   keyboard accessibility (skip link, focus management, live regions)
 

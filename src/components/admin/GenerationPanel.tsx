@@ -24,9 +24,13 @@ type Job = {
   model: string;
   status: string;
   requestedCount: number;
+  acceptedCount: number;
   producedCount: number;
   validCount: number;
   duplicateCount: number;
+  batchSize: number;
+  maxCalls: number;
+  backfillRound: number;
   costUsd: number | null;
   errorCode: string | null;
   errorMessage: string | null;
@@ -38,11 +42,18 @@ type Job = {
 type Progress = {
   jobId: string;
   status: string;
+  /** The target: clean questions the job is driving for. */
   requestedCount: number;
+  /** Clean questions accepted so far. */
+  acceptedCount: number;
   producedCount: number;
   validCount: number;
   duplicateCount: number;
+  /** Calls made so far. */
   round: number;
+  /** Planned calls at the current batch size. */
+  totalPlannedCalls: number;
+  batchSize: number;
   done: boolean;
   error: string | null;
 };
@@ -63,12 +74,18 @@ export function GenerationPanel({
   initialJobs,
   configured,
   defaultModel,
+  defaultBatchSize = 25,
+  maxRequested = 300,
   categories,
   sets,
 }: {
   initialJobs: Job[];
   configured: boolean;
   defaultModel: string;
+  /** Global `generation.batch_size`; overridable per job. */
+  defaultBatchSize?: number;
+  /** Global `generation.max_requested` ceiling. */
+  maxRequested?: number;
   categories: Array<{ id: string; title: string }>;
   sets: Array<{ id: string; title: string; status: string; categoryTitle?: string }>;
 }) {
@@ -77,7 +94,8 @@ export function GenerationPanel({
   const [brief, setBrief] = useState("");
   const [target, setTarget] = useState("");
   const [sources, setSources] = useState("");
-  const [count, setCount] = useState("10");
+  const [count, setCount] = useState("25");
+  const [batchSize, setBatchSize] = useState(String(defaultBatchSize));
   const [difficulty, setDifficulty] = useState("medium");
   const [model, setModel] = useState(defaultModel);
   const [categoryId, setCategoryId] = useState("");
@@ -131,7 +149,8 @@ export function GenerationPanel({
           brief,
           target: target.trim() || null,
           sources: sources.trim() || null,
-          requestedCount: Number(count) || 10,
+          requestedCount: Number(count) || 25,
+          batchSize: Number(batchSize) || defaultBatchSize,
           difficulty,
           model,
           targetCategoryId: categoryId || null,
@@ -149,8 +168,10 @@ export function GenerationPanel({
       // Open the review immediately, then keep it in view as it fills up.
       scrollToBatch();
 
-      // Advance until the job says it is done. Each call is one bounded step.
-      for (let step = 0; step < 6; step++) {
+      // Advance until the job says it is done. Each call is ONE internal batch,
+      // so a 300-question job at 25/call needs up to ~12-16 calls; the job's own
+      // max_calls terminates the loop, this bound is just a browser-side backstop.
+      for (let step = 0; step < 60; step++) {
         const res = await fetch(`/api/admin/generation-jobs/${jobId}/step`, { method: "POST" });
         const body = (await res.json()) as { progress?: Progress; error?: { message: string } };
         if (!res.ok || !body.progress) {
@@ -259,16 +280,50 @@ export function GenerationPanel({
           />
         </label>
 
-        <div className="grid gap-3 sm:grid-cols-3">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
-            How many
-            <select value={count} onChange={(e) => setCount(e.target.value)} className={field}>
-              {[10, 15, 20, 25, 50].map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </select>
+            Target questions
+            <input
+              type="number"
+              min={1}
+              max={maxRequested}
+              value={count}
+              onChange={(e) => setCount(e.target.value)}
+              className={field}
+            />
+            <span className="flex flex-wrap gap-1 pt-0.5">
+              {[25, 50, 100, 200, 300]
+                .filter((n) => n <= maxRequested)
+                .map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    onClick={() => setCount(String(n))}
+                    className={cn(
+                      "rounded border px-1.5 py-0.5 text-[10px] font-semibold",
+                      count === String(n)
+                        ? "border-slate-900 bg-slate-900 text-white"
+                        : "border-slate-300 bg-white text-slate-600 hover:bg-slate-100",
+                    )}
+                  >
+                    {n}
+                  </button>
+                ))}
+            </span>
+          </label>
+          <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
+            Batch size (per call)
+            <input
+              type="number"
+              min={5}
+              max={50}
+              value={batchSize}
+              onChange={(e) => setBatchSize(e.target.value)}
+              className={field}
+            />
+            <span className="text-[10px] font-normal text-slate-400">
+              Small batches keep quality high · 5–50
+            </span>
           </label>
           <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
             Difficulty
@@ -297,8 +352,8 @@ export function GenerationPanel({
             {running ? "Generating…" : "Generate"}
           </button>
           <span className="text-xs text-slate-500">
-            Ask for N, get N. Duplicates are detected against the whole bank (including
-            every Q Set) and shown as rejected by default — never hidden. Max 50 per job.
+            Small batches, filtered after every one and refilled until the target is met.
+            Duplicates are shown as rejected by default — never hidden. Max {maxRequested} per job.
           </span>
         </div>
 
@@ -318,10 +373,9 @@ export function GenerationPanel({
         >
           {progress.done ? (
             <>
-              Asked <strong>{progress.requestedCount}</strong>, generated{" "}
-              <strong>{progress.producedCount}</strong> question
-              {progress.producedCount === 1 ? "" : "s"} in{" "}
-              <strong>{progress.round}</strong> round{progress.round === 1 ? "" : "s"} —{" "}
+              Target <strong>{progress.requestedCount}</strong> — <strong>{progress.acceptedCount}</strong>{" "}
+              accepted in <strong>{progress.round}</strong> call{progress.round === 1 ? "" : "s"} of{" "}
+              {progress.batchSize}/batch. <strong>{progress.producedCount}</strong> generated in total,{" "}
               <strong>{progress.duplicateCount}</strong> flagged as duplicate
               {progress.duplicateCount === 1 ? "" : "s"} (rejected by default, shown below).
               {progress.error && <> {progress.error}</>}{" "}
@@ -329,8 +383,11 @@ export function GenerationPanel({
             </>
           ) : (
             <>
-              Round {progress.round} done — {progress.producedCount}/{progress.requestedCount}{" "}
-              generated so far. Topping up…
+              Batch <strong>{progress.round + 1}</strong>
+              {progress.totalPlannedCalls > 1 ? <> of ~{progress.totalPlannedCalls}</> : null} ·
+              accepted <strong>{progress.acceptedCount}</strong> of{" "}
+              <strong>{progress.requestedCount}</strong> ·{" "}
+              <strong>{progress.duplicateCount}</strong> flagged. Generating the next batch…
             </>
           )}
         </div>
@@ -374,8 +431,9 @@ export function GenerationPanel({
                 </span>
                 <span className="text-sm font-medium text-slate-900">{job.topic}</span>
                 <span className="text-xs text-slate-500">
-                  asked {job.requestedCount} · produced {job.producedCount} · valid {job.validCount} · dup{" "}
-                  {job.duplicateCount}
+                  target {job.requestedCount} · accepted {job.acceptedCount} · generated{" "}
+                  {job.producedCount} · flagged {job.duplicateCount} · {job.backfillRound} call
+                  {job.backfillRound === 1 ? "" : "s"} of {job.batchSize}/batch
                   {job.costUsd != null && ` · ~$${job.costUsd.toFixed(4)}`}
                   {(job.providerOnly || job.providerOrder) && (
                     <span className="font-mono text-[11px] text-slate-400">

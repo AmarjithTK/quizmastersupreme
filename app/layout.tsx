@@ -12,6 +12,16 @@ export const metadata: Metadata = {
   },
   description:
     "Practice quizzes with rich explanations, timed mock papers and progress that survives closing the browser.",
+  // Brand assets live in `web/` (source of truth) and are served from `public/`.
+  icons: {
+    icon: [
+      { url: "/favicon.ico", sizes: "any" },
+      { url: "/icon-192.png", type: "image/png", sizes: "192x192" },
+      { url: "/icon-512.png", type: "image/png", sizes: "512x512" },
+    ],
+    apple: [{ url: "/apple-touch-icon.png", sizes: "180x180" }],
+  },
+  manifest: "/manifest.webmanifest",
 };
 
 export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

@@ -7,7 +7,9 @@ import {
   AI_MODEL_PRESETS,
   AI_PROVIDERS,
   DEFAULT_AI_MODEL,
+  GENERATION_LIMITS,
   getAiGenerationSettings,
+  getGenerationSettings,
   getProviderRouting,
 } from "@/modules/settings";
 
@@ -15,16 +17,18 @@ export const dynamic = "force-dynamic";
 export const metadata = { title: "Settings · Admin" };
 
 /**
- * Admin settings (M10+): AI generation provider + default model.
+ * Admin settings (M10+): AI provider + default model, and the generation
+ * pipeline knobs (batch size, target ceiling, refill floor, call cap).
  */
 export default async function AdminSettingsPage() {
   const user = await getCurrentPageUser();
   if (!user) redirect("/login");
   if (user.role !== "admin") return <ForbiddenCard />;
 
-  const [settings, routing] = await Promise.all([
+  const [settings, routing, generation] = await Promise.all([
     getAiGenerationSettings(),
     getProviderRouting(),
+    getGenerationSettings(),
   ]);
 
   return (
@@ -33,7 +37,7 @@ export default async function AdminSettingsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
           <p className="mt-1 text-sm text-slate-500">
-            Generation defaults — provider and model for new AI jobs.
+            Generation defaults — model, batch size and limits for new AI jobs.
           </p>
         </div>
         <Link
@@ -47,6 +51,8 @@ export default async function AdminSettingsPage() {
       <AiSettingsPanel
         initial={settings}
         initialRouting={routing}
+        initialGeneration={generation}
+        generationLimits={GENERATION_LIMITS}
         providers={[...AI_PROVIDERS]}
         modelPresets={[...AI_MODEL_PRESETS]}
       />

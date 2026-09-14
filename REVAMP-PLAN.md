@@ -1,6 +1,11 @@
 # REVAMP-PLAN — Full simplification & generation-method revamp
 
-Status: **IMPLEMENTED — all phases landed, 259 tests green.**
+Status: **IMPLEMENTED — all phases landed, 267 tests green.**
+
+> **Update (0006_candidate_dedupe):** the "duplicates are auto-filtered" decision in
+> §3.3 was reversed at the product's request. Duplicates are now **stored, marked
+> rejected by default, shown with the existing question they matched, and overridable**
+> via Accept. See §11.
 Audience: the one person whose time this saves. Read §0 for the why, §1 for the target, then §10 for what actually shipped.
 
 ---
@@ -336,3 +341,25 @@ All phases landed. Evidence:
 
 Remaining known limits: retrieval/verification is against local D1 only; the live
 OpenRouter round-trip and a deployed Worker are still unverified (unchanged from before).
+
+---
+
+## 11. Follow-up: duplicate policy reversal (migration 0006)
+
+The revamp auto-DROPPED duplicates. The product then asked for the opposite: see them,
+understand them, decide.
+
+- `ai_candidates` gained `dedupe_status`, `dedupe_matched_question_id`,
+  `dedupe_matched_stem`, `dedupe_similarity`, `dedupe_reason` (migration `0006`).
+- The pipeline stores every valid question; a flagged one is inserted with
+  `rejected = 1`, so it is excluded from the commit by default but fully visible.
+- The review screen shows the badge, the reason, and the existing question it matched
+  (with a link into the bank), and offers **Accept** — which clears `rejected`.
+- `createQuestion()` gained `allowDuplicate`, used only when committing a candidate the
+  admin explicitly accepted, so a human override wins. Overrides are counted and
+  audited (`duplicateOverrides`).
+- `producedCount` now means "questions stored" (including flagged ones), so backfill
+  only compensates for a model returning fewer rows than asked — duplicates are never
+  silently replaced.
+- The batch review opens automatically and refreshes after every round, so a finished
+  run needs no refresh and no "Review batch" click.

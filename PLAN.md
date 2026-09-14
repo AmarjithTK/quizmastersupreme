@@ -17,13 +17,14 @@
 > - **Playability comes from the SET.** A question is playable when it is `active`
 >   and attached to a *published* set. There is **no per-question publish step**.
 > - **"Ask for N, get N."** Generation sizes its output request from the count and
->   the model's real ceiling (DeepSeek V4.1 Flash ≈125k output, not 8000), filters
->   duplicates against the whole bank as they arrive, and runs **backfill rounds**
->   for the shortfall (§12).
-> - **Dedupe is two layers** (exact hash → FTS5 + Jaccard), applied at write time and
->   **auto-filtering** at the reject threshold. The simhash prefilter, the
->   embeddings/Vectorize layer, the retroactive sweep, the triage UI, the review
->   queue and `duplicate_flags` were removed (§13, §9.6, §9.7).
+>   the model's real ceiling (DeepSeek V4.1 Flash ≈125k output, not 8000) and runs
+>   **backfill rounds** when the model returns fewer rows (§12).
+> - **Duplicates are shown, not dropped.** A question that matches the bank arrives
+>   `rejected` by default with the existing question it matched and the reason, and the
+>   reviewer can **Accept** it (§13.6).
+> - **Dedupe is two layers** (exact hash → FTS5 + Jaccard), applied at write time. The
+>   simhash prefilter, the embeddings/Vectorize layer, the retroactive sweep, the triage
+>   UI, the review queue and `duplicate_flags` were removed (§13, §9.6, §9.7).
 > - **Commit is one action**: the kept batch is inserted as `active` questions and
 >   attached to a Q Set, playable as soon as the set is published.
 >
@@ -1362,11 +1363,13 @@ Difficulty [ medium ▾ ]     Model [ deepseek/deepseek-v4.1-flash ]
 ```
 
 The job runs in bounded rounds driven by `/step`. Each round asks for the shortfall,
-auto-filters duplicates against the whole bank, and stores the survivors. A short
-round leaves the job `running`; the next call tops it up (up to 3 rounds). The progress
-line reports the truth: *asked 10 · delivered 10 fresh · 2 duplicates skipped · 1 round*.
+compares every question against the whole bank, and stores all of them — a duplicate
+arrives rejected by default, with the question it matched. A round that returns fewer
+rows than asked leaves the job `running`; the next call tops it up (up to 3 rounds).
+The progress line reports the truth: *asked 10 · generated 10 · 2 flagged as duplicates*.
 
-The finished batch opens below the form (see §9.6).
+**The finished batch opens below the form automatically** — no refresh, no "Review
+batch" click (see §9.6).
 
 ### 9.6 Batch review (REVISED — was "Review queue")
 
@@ -1623,11 +1626,16 @@ queued ──> round 1 ──┬──> succeeded   (produced >= requested)
    Llama 3.3 (4k) / Haiku (8k) truncate; the backfill rounds finish the job.
 5. Call the model; archive the raw response to R2 (`ai-jobs/<id>/response-r<N>.txt`).
 6. Parse with the repair chain, validate each candidate individually.
-7. Dedupe each valid candidate against the WHOLE bank (layers 1–2):
-     exact match OR Jaccard >= dedupe.jaccard_reject  → DROP, count as duplicate
-     Jaccard >= dedupe.jaccard_review                 → keep, badge as possible dup
-   Also drop anything whose normalized hash this batch already produced.
-8. Store the survivors in `ai_candidates` (batch order preserved).
+7. Compare each valid candidate against the WHOLE bank (layers 1–2):
+     exact match            → dedupe_status='exact_dup',    rejected by default
+     Jaccard >= jaccardReject → dedupe_status='near_dup',   rejected by default
+     Jaccard >= jaccardReview → dedupe_status='possible_dup', rejected by default
+     otherwise              → dedupe_status='clean',        accepted
+   A question this batch already produced matches the same way, against its
+   batch mate. Nothing is dropped: the matched stem + reason are stored.
+8. Store EVERY valid question in `ai_candidates` (batch order preserved), each
+   carrying its dedupe status, the matched question and a human-readable reason.
+   Flagged rows arrive `rejected = 1` and stay visible in the review screen.
 9. produced_count += stored; duplicate_count += dropped; backfill_round = round.
    produced >= requested → succeeded; else round < 3 → running; else partial/failed.
 10. Audit the round. The admin UI calls /step again until done.
@@ -1768,9 +1776,11 @@ embeddings/Vectorize layer 3 (never wired — the bindings were commented out in
 semantic dedupe is ever wanted again the files are in git history; it is a functional
 removal, not a data loss.
 
-**The auto-filter rule:** `verdict.autoReject || verdict.status === "near_dup"` — the
-one call site is `isAutoFiltered()` in `modules/dedupe`. The reject threshold lives in
-`app_settings` (`dedupe.jaccard_reject`), so tuning needs no deploy.
+**The rule for generation:** nothing is filtered out — every generated question is
+stored, and a flagged one is created `rejected` so it is excluded by default but stays
+visible and overridable. `isAutoFiltered()` in `modules/dedupe` remains the rule for
+whether a question may be inserted into the BANK on a normal write path (manual, CSV);
+the commit path bypasses it only for a candidate a human explicitly accepted.
 
 ### 13.2 Layer 1 — normalization and exact matching
 
@@ -1850,12 +1860,15 @@ type DedupeVerdict = {
 ```
 
 **Policy:**
-- `exact_dup` (layer 1) and `near_dup` (Jaccard ≥ `dedupe.jaccard_reject`) are
-  **auto-filtered** — generation drops them and asks for a replacement instead of
-  showing them to a human.
-- `possible_dup` (Jaccard ≥ `dedupe.jaccard_review`) is a **badge only**; it never
-  blocks. "Who created Linux?" and "In what year was Linux first released?" are both
-  good questions and both must survive.
+- Every band is **surfaced, never hidden**. `exact_dup` and `near_dup` are certain
+  enough to arrive rejected; `possible_dup` is uncertain and also arrives rejected by
+  default but is explicitly labelled "check before keeping".
+- Each flagged question carries `dedupeMatchedStem` (the existing question it matched),
+  `dedupeMatchedQuestionId` when that question is in the bank, and `dedupeReason`.
+- The reviewer can **Accept** any of them; accepting clears `rejected` and the commit
+  path inserts it (explicit override, counted and audited).
+- A duplicate of another question in the same batch matches its batch mate instead of a
+  bank row, and says so.
 
 ### 13.7 Retroactive sweep — **RETIRED**
 

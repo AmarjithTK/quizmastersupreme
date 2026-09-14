@@ -27,5 +27,15 @@ export default defineConfig({
     // Integration tests share one local D1 file; run them serially.
     fileParallelism: false,
     testTimeout: 20_000,
+    env: {
+      /**
+       * Every test file spins up a Wrangler platform proxy, which writes a log
+       * file. The default location (~/.config/.wrangler/logs) is outside the
+       * workspace and can be read-only (EROFS), and a failed write there makes
+       * `getPlatformProxy` throw inside a beforeAll — which skips a whole file
+       * and looks like a random, unreproducible failure. Keep it in the repo.
+       */
+      WRANGLER_LOG_PATH: ".tooling/wrangler-logs",
+    },
   },
 });

@@ -3,7 +3,11 @@ import { logInfo } from "@/lib/logger";
 import { bindings } from "@/lib/cloudflare/bindings";
 import { requireAdmin } from "@/modules/auth";
 import { createGenerationJob, listJobs, openRouterKeyConfigured } from "@/modules/ai";
-import { getAiGenerationSettings, getProviderRouting } from "@/modules/settings";
+import {
+  getAiGenerationSettings,
+  getGenerationSettings,
+  getProviderRouting,
+} from "@/modules/settings";
 
 /**
  * /api/admin/generation-jobs
@@ -18,10 +22,15 @@ export async function GET(request: Request) {
   try {
     await requireAdmin(request);
     const jobs = await listJobs(30);
+    const [generation, ai] = await Promise.all([
+      getGenerationSettings(),
+      getAiGenerationSettings(),
+    ]);
     return jsonResponse({
       jobs,
       configured: openRouterKeyConfigured(),
-      defaultModel: bindings().DEFAULT_GENERATION_MODEL,
+      defaultModel: bindings().DEFAULT_GENERATION_MODEL || ai.model,
+      generation,
     });
   } catch (error) {
     return errorResponse(error);
@@ -50,7 +59,9 @@ export async function POST(request: Request) {
       {
         topic: typeof body.topic === "string" ? body.topic : "",
         brief: typeof body.brief === "string" ? body.brief : "",
-        requestedCount: typeof body.requestedCount === "number" ? body.requestedCount : 10,
+        requestedCount: typeof body.requestedCount === "number" ? body.requestedCount : 25,
+        // Per-job batch size; falls back to the admin default in createGenerationJob.
+        batchSize: typeof body.batchSize === "number" ? body.batchSize : null,
         difficulty: typeof body.difficulty === "string" ? body.difficulty : null,
         subtopics: Array.isArray(body.subtopics)
           ? body.subtopics.filter((s): s is string => typeof s === "string")
@@ -72,6 +83,9 @@ export async function POST(request: Request) {
     logInfo("route", `job ${job.id} created by admin ${actor.id}`, {
       topic: job.topic,
       model: job.model,
+      requested: job.requestedCount,
+      batchSize: job.batchSize,
+      maxCalls: job.maxCalls,
       hasTarget: Boolean(job.target),
       hasSources: Boolean(job.sources),
     });

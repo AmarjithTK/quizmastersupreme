@@ -30,10 +30,12 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import { db } from "@/db/client";
 import {
   aiCandidates,
+  aiGenerationBatches,
   aiGenerationJobs,
   newId,
   nowMs,
   type AiCandidate,
+  type AiGenerationBatch,
   type AiGenerationJob,
   type QuestionStatus,
 } from "@/db/schema";
@@ -42,7 +44,7 @@ import { recordAudit } from "@/modules/audit";
 import { logError, logInfo, logWarn, logException } from "@/lib/logger";
 import { checkCandidates } from "@/modules/dedupe";
 import { computeDedupeHashes, createQuestion, validateQuestion, type QuestionDraft } from "@/modules/questions";
-import { getDedupeThresholds } from "@/modules/settings";
+import { getDedupeThresholds, getGenerationSettings } from "@/modules/settings";
 import {
   GenerationParseError,
   parseGenerationResponse,
@@ -51,13 +53,18 @@ import {
 import { buildSystemPrompt, buildUserPrompt, PROMPT_VERSION } from "./prompts/generate";
 import { estimateCostUsd, LlmError, type LlmProvider } from "./provider";
 import { outputBudgetFor } from "./budget";
-import { buildCoverageDigest } from "./coverage";
+import { buildCoverageDigest, extractConceptKey, estimateTokens } from "./coverage";
 
 const MAX_BOUND_PARAMS = 90;
-/** Hard ceiling on questions per job. */
-export const MAX_REQUESTED = 50;
-/** Model calls per job: the first ask plus this many backfill rounds. */
-export const MAX_BACKFILL_ROUNDS = 3;
+/**
+ * Absolute ceiling, independent of settings — the last line of defence against
+ * a bad settings row. The effective ceiling is `generation.max_requested`.
+ */
+export const MAX_REQUESTED_HARD = 1000;
+/** Token budget for the job-local "already generated" concept block. */
+const JOB_CONCEPTS_MAX_TOKENS = 1200;
+/** Two consecutive batches below this acceptance rate = the topic is saturated. */
+const SATURATION_RATE = 0.25;
 
 export type RawStorage = {
   put(key: string, value: string): Promise<void>;
@@ -72,15 +79,21 @@ export type GenerationDeps = {
 export type JobProgress = {
   jobId: string;
   status: string;
-  /** What the admin asked for. */
+  /** THE target: clean questions the job is driving for. */
   requestedCount: number;
-  /** Fresh, unique questions produced so far. */
+  /** Clean questions accepted so far — the number the loop drives on. */
+  acceptedCount: number;
+  /** Everything stored, including duplicates that arrived rejected. */
   producedCount: number;
   validCount: number;
-  /** Duplicates auto-filtered (never stored). */
+  /** Questions stored but rejected by default (duplicates). */
   duplicateCount: number;
-  /** Which model call this job is on (1-based once it has run). */
+  /** Model calls made so far (1-based once the first has run). */
   round: number;
+  /** Planned number of calls at the current batch size. */
+  totalPlannedCalls: number;
+  /** Questions per internal call for this job. */
+  batchSize: number;
   /** True once the job can advance no further without an admin action. */
   done: boolean;
   error: string | null;
@@ -90,6 +103,10 @@ export type CreateJobInput = {
   topic: string;
   brief: string;
   requestedCount: number;
+  /** Per-job override of the global batch size (5–50). */
+  batchSize?: number | null;
+  /** Per-job override of the call cap. */
+  maxCalls?: number | null;
   difficulty?: string | null;
   subtopics?: string[] | null;
   avoidTopics?: string[] | null;
@@ -135,16 +152,32 @@ export async function createGenerationJob(
   input: CreateJobInput,
   actorId: string,
 ): Promise<AiGenerationJob> {
+  const settings = await getGenerationSettings();
+
   const topic = input.topic.trim();
   if (!topic) throw validationError("A topic is required.");
   if (!input.brief.trim()) throw validationError("A brief is required.");
   if (!Number.isInteger(input.requestedCount) || input.requestedCount < 1) {
     throw validationError("Request at least one question.");
   }
-  if (input.requestedCount > MAX_REQUESTED) {
-    throw validationError(`Request at most ${MAX_REQUESTED} questions per job.`);
+  // The effective ceiling is the admin setting; the hard constant is a backstop.
+  const ceiling = Math.min(settings.maxRequested, MAX_REQUESTED_HARD);
+  if (input.requestedCount > ceiling) {
+    throw validationError(`Request at most ${ceiling} questions per job.`);
   }
   if (!input.model.trim()) throw validationError("A model is required.");
+
+  // Batch size is a per-job override of the global default, clamped to sanity.
+  const batchSize = Math.min(
+    Math.max(input.batchSize ?? settings.batchSize, 5),
+    Math.max(5, Math.min(50, settings.batchSize * 2)),
+  );
+  // Enough calls for the planned batches plus ~40% refill slack.
+  const plannedCalls = Math.ceil(input.requestedCount / batchSize);
+  const maxCalls = Math.min(
+    100,
+    Math.max(input.maxCalls ?? 0, Math.ceil(plannedCalls * 1.4) + 1),
+  );
 
   // Compress what the bank already covers for this topic, so the model does not
   // re-ask facts we already have. A stateless API has no other memory (§12.4).
@@ -189,6 +222,13 @@ export async function createGenerationJob(
     duplicateCount: 0,
     backfillRound: 0,
     duplicateSkipped: 0,
+    acceptedCount: 0,
+    batchSize,
+    maxCalls,
+    coveredConcepts: null,
+    sourcePool: input.sources?.trim() ? JSON.stringify({ userSources: input.sources.trim() }) : null,
+    groundingCostUsd: null,
+    groundingCached: 0,
     promptTokens: null,
     completionTokens: null,
     costUsd: null,
@@ -206,6 +246,8 @@ export async function createGenerationJob(
     topic: row.topic,
     model: row.model,
     requestedCount: row.requestedCount,
+    batchSize: row.batchSize,
+    maxCalls: row.maxCalls,
     actorId,
     coverageQuestions: digest.questionCount,
     coverageConcepts: digest.conceptCount,
@@ -214,6 +256,8 @@ export async function createGenerationJob(
   await recordAudit(actorId, "ai.job_create", "ai_job", row.id, null, {
     topic: row.topic,
     requestedCount: row.requestedCount,
+    batchSize: row.batchSize,
+    maxCalls: row.maxCalls,
     model: row.model,
   });
 
@@ -254,10 +298,13 @@ function progressOf(job: AiGenerationJob, error: string | null = null): JobProgr
     jobId: job.id,
     status: job.status,
     requestedCount: job.requestedCount,
+    acceptedCount: job.acceptedCount,
     producedCount: job.producedCount,
     validCount: job.validCount,
     duplicateCount: job.duplicateCount,
     round: job.backfillRound,
+    totalPlannedCalls: Math.max(1, Math.ceil(job.requestedCount / Math.max(1, job.batchSize))),
+    batchSize: job.batchSize,
     done: TERMINAL_STATUSES.includes(job.status),
     error,
   };
@@ -290,35 +337,37 @@ export async function runGenerationStep(
 }
 
 /**
- * One model call: ask for the shortfall, validate, flag duplicates against the
- * whole bank (stored, rejected by default), and stop at the requested count or
- * after MAX_BACKFILL_ROUNDS.
+ * ONE internal batch (one model call): ask for the shortfall (capped at the
+ * job's batch size), validate, flag duplicates against the whole bank AND
+ * everything this job already produced, store it all, then decide whether the
+ * job continues (refill), succeeded, or stopped (saturation / call cap).
  */
 async function generateRound(job: AiGenerationJob, deps: GenerationDeps): Promise<JobProgress> {
-  const round = job.backfillRound + 1;
-  const remaining = Math.max(0, job.requestedCount - job.producedCount);
+  const settings = await getGenerationSettings();
+  const callsMade = job.backfillRound;
+  const batchNo = callsMade + 1;
+  const shortfall = Math.max(0, job.requestedCount - job.acceptedCount);
 
-  if (remaining <= 0) {
-    await db()
-      .update(aiGenerationJobs)
-      .set({ status: "succeeded", finishedAt: nowMs() })
-      .where(eq(aiGenerationJobs.id, job.id));
+  // ── terminal guards ───────────────────────────────────────────────────────
+  if (shortfall <= 0) {
+    await finishJob(job.id, "succeeded");
     return progressOf(await getJob(job.id));
   }
+  if (callsMade >= job.maxCalls) {
+    const message = `Reached the ${job.maxCalls}-call limit with ${job.acceptedCount} of ${job.requestedCount} accepted.`;
+    await finishJob(job.id, job.acceptedCount > 0 ? "partial" : "failed", "MAX_CALLS", message);
+    return progressOf(await getJob(job.id), message);
+  }
 
-  // What this batch has already produced, fed back so the model cannot repeat
-  // it. This is what makes the backfill rounds add FRESH questions.
-  const existing = await listCandidates({ jobId: job.id, limit: 200 });
-  const acceptedBlock =
-    existing.length > 0
-      ? [
-          "",
-          "ALREADY GENERATED IN THIS BATCH (do NOT repeat these):",
-          ...existing.map((candidate) => `- ${candidate.stem}`),
-        ].join("\n")
-      : "";
-  const digest = `${job.coverageDigest ?? ""}${acceptedBlock}`;
+  // ── how many to ask for ───────────────────────────────────────────────────
+  // A full batch, but the final refill never becomes a degenerate 1-question
+  // prompt (countMode "exact" is the opt-in exception).
+  const ask =
+    settings.countMode === "exact"
+      ? Math.max(1, Math.min(job.batchSize, shortfall))
+      : Math.min(job.batchSize, Math.max(shortfall, settings.minRefill));
 
+  const digest = buildJobDigest(job);
   const system = buildSystemPrompt();
   const user = buildUserPrompt({
     topic: job.topic,
@@ -327,25 +376,43 @@ async function generateRound(job: AiGenerationJob, deps: GenerationDeps): Promis
     subtopics: parseJsonArray(job.subtopics),
     difficulty: job.difficulty,
     examBody: null,
-    count: remaining,
+    count: ask,
     brief: job.brief,
     coverageDigest: digest,
     avoidTopics: parseJsonArray(job.avoidTopics),
   });
 
-  const maxTokens = outputBudgetFor(remaining, job.model);
+  const maxTokens = outputBudgetFor(ask, job.model);
   const startedAt = nowMs();
+  const batchId = newId();
 
-  logInfo("ai", `round ${round}/${MAX_BACKFILL_ROUNDS} for ${job.id}`, {
+  await db().insert(aiGenerationBatches).values({
+    id: batchId,
+    jobId: job.id,
+    batchNo,
+    status: "running",
+    asked: ask,
+    startedAt,
+  });
+  await db()
+    .update(aiGenerationJobs)
+    .set({ status: "running", startedAt: job.startedAt ?? startedAt })
+    .where(eq(aiGenerationJobs.id, job.id));
+
+  logInfo("ai", `batch ${batchNo} for ${job.id}`, {
     model: job.model,
-    asking: remaining,
+    asking: ask,
+    shortfall,
+    batchSize: job.batchSize,
     maxTokens,
-    existingInBatch: existing.length,
+    acceptedSoFar: job.acceptedCount,
+    coveredConcepts: parseJsonArray(job.coveredConcepts)?.length ?? 0,
   });
 
+  // ── the model call (one retry when the provider says it is retryable) ─────
   let response;
   try {
-    response = await deps.provider.generate({
+    response = await callWithRetry(deps, {
       model: job.model,
       system,
       user,
@@ -357,17 +424,19 @@ async function generateRound(job: AiGenerationJob, deps: GenerationDeps): Promis
   } catch (error) {
     const message = error instanceof LlmError ? error.message : "The model provider call failed.";
     const code = error instanceof LlmError ? error.code : "PROVIDER_ERROR";
-    logException("ai", `round ${round} FAILED for ${job.id}`, error);
-    await failJob(job.id, code, message);
+    logException("ai", `batch ${batchNo} FAILED for ${job.id}`, error);
+    await failBatch(batchId, startedAt, code, message);
+    await bumpCallCount(job.id, batchNo);
+    const partial = job.producedCount > 0 || job.acceptedCount > 0;
+    await finishJob(job.id, partial ? "partial" : "failed", code, message);
     return progressOf(await getJob(job.id), message);
   }
 
-  const key = `ai-jobs/${job.id}/response-r${round}.txt`;
+  const key = `ai-jobs/${job.id}/response-r${batchNo}.txt`;
   try {
     await deps.storage.put(key, response.text);
   } catch (error) {
-    // Archiving is diagnostic, not correctness — a failed R2 write must not
-    // lose an otherwise good batch, but it IS logged.
+    // Archiving is diagnostic, not correctness.
     logException("ai", `could not archive raw response for ${job.id}`, error);
   }
 
@@ -377,19 +446,22 @@ async function generateRound(job: AiGenerationJob, deps: GenerationDeps): Promis
   } catch (error) {
     const message =
       error instanceof GenerationParseError ? error.message : "The model response could not be parsed.";
-    logException("ai", `round ${round} parse failed for ${job.id}`, error);
-    await failJob(job.id, "UNPARSEABLE", message);
+    logException("ai", `batch ${batchNo} parse failed for ${job.id}`, error);
+    await failBatch(batchId, startedAt, "UNPARSEABLE", message);
+    await bumpCallCount(job.id, batchNo);
+    const partial = job.producedCount > 0 || job.acceptedCount > 0;
+    await finishJob(job.id, partial ? "partial" : "failed", "UNPARSEABLE", message);
     return progressOf(await getJob(job.id), message);
   }
 
-  // ── Validate each candidate; one bad item must not sink the batch ────────
+  // ── validate individually ─────────────────────────────────────────────────
   const valid: ParsedCandidate[] = [];
   for (const candidate of parsed.accepted) {
     const { errors } = validateQuestion(candidate.draft);
     if (errors.length === 0) valid.push(candidate);
   }
 
-  // ── Compare against the WHOLE bank (every saved question, in any Q Set) ──
+  // ── compare against the WHOLE bank + everything this job produced ─────────
   const thresholds = await getDedupeThresholds();
   const verdicts = await checkCandidates(
     valid.map((candidate) => ({
@@ -399,18 +471,11 @@ async function generateRound(job: AiGenerationJob, deps: GenerationDeps): Promis
     { thresholds },
   );
 
-  /**
-   * Nothing is dropped here. A duplicate is STORED and arrives rejected by
-   * default, carrying the question it matched and the reason — so the reviewer
-   * can see it, judge it, and accept it if they disagree.
-   *
-   * `batchHashes` catches what the bank check cannot: a question this same job
-   * produced in an earlier round, or earlier in this round.
-   */
   const batchHashes = await loadBatchHashes(job.id);
   const now = nowMs();
-  let nextIndex = existing.length;
+  let nextIndex = job.producedCount;
   const rows: Array<typeof aiCandidates.$inferInsert> = [];
+  const acceptedConcepts: string[] = [];
   let flagged = 0;
 
   for (const [index, candidate] of valid.entries()) {
@@ -426,12 +491,11 @@ async function generateRound(job: AiGenerationJob, deps: GenerationDeps): Promis
       value == null ? "" : ` (${Math.round(value * 100)}% match)`;
 
     if (mate) {
-      // Same job, earlier question — a bank lookup cannot see these yet.
       dedupeStatus = "exact_dup";
       matchedQuestionId = null;
       matchedStem = mate.stem;
       similarity = 1;
-      reason = `Already produced in this batch as Q${(mate.batchIndex ?? 0) + 1}.`;
+      reason = `Already produced in this job as Q${(mate.batchIndex ?? 0) + 1}.`;
     } else if (dedupeStatus === "exact_dup") {
       reason = "Identical to a question already in the bank.";
     } else if (dedupeStatus === "near_dup") {
@@ -440,7 +504,6 @@ async function generateRound(job: AiGenerationJob, deps: GenerationDeps): Promis
       reason = `Looks similar to an existing bank question${percent(similarity)} — check it before keeping.`;
     }
 
-    // Rejected by default unless it is clearly unique.
     const rejected = dedupeStatus === "clean" ? 0 : 1;
     if (rejected === 1) flagged++;
 
@@ -449,6 +512,8 @@ async function generateRound(job: AiGenerationJob, deps: GenerationDeps): Promis
       id: newId(),
       jobId: job.id,
       batchIndex,
+      batchNo,
+      superseded: 0,
       stem: candidate.draft.stem,
       optionsJson: JSON.stringify(candidate.draft.options),
       correctOptionKey: candidate.draft.correctOptionKey,
@@ -466,12 +531,18 @@ async function generateRound(job: AiGenerationJob, deps: GenerationDeps): Promis
       createdAt: now,
     });
 
-    // Later questions in this round compare against this one.
+    if (rejected === 0) {
+      const answer =
+        candidate.draft.options.find((option) => option.key === candidate.draft.correctOptionKey)
+          ?.body ?? null;
+      const concept = extractConceptKey(candidate.draft.stem, answer);
+      if (concept) acceptedConcepts.push(concept);
+    }
+
     batchHashes.set(verdict.normalizedHash, { stem: candidate.draft.stem, batchIndex });
   }
 
-  // D1's ~100 bound-parameter ceiling; derive the chunk from the real column
-  // count so adding a column can never silently break the insert.
+  // D1's ~100 bound-parameter ceiling; derive the chunk from the real column count.
   const columnsPerRow = Object.keys(aiCandidates).length;
   const perChunk = Math.max(1, Math.floor(MAX_BOUND_PARAMS / Math.max(1, columnsPerRow)));
   for (let i = 0; i < rows.length; i += perChunk) {
@@ -479,30 +550,55 @@ async function generateRound(job: AiGenerationJob, deps: GenerationDeps): Promis
   }
 
   const produced = job.producedCount + rows.length;
+  const acceptedTotal = job.acceptedCount + acceptedConcepts.length;
   const duplicateTotal = job.duplicateCount + flagged;
   const promptTokens = (job.promptTokens ?? 0) + (response.promptTokens ?? 0);
   const completionTokens = (job.completionTokens ?? 0) + (response.completionTokens ?? 0);
-  const exhausted = round >= MAX_BACKFILL_ROUNDS;
+  const batchCost = estimateCostUsd(job.model, response.promptTokens, response.completionTokens);
+  const nowFinished = nowMs();
 
+  await db()
+    .update(aiGenerationBatches)
+    .set({
+      status: "succeeded",
+      produced: rows.length,
+      accepted: acceptedConcepts.length,
+      flagged,
+      promptTokens: response.promptTokens,
+      completionTokens: response.completionTokens,
+      costUsd: batchCost,
+      durationMs: nowFinished - startedAt,
+      rawResponseKey: key,
+      finishedAt: nowFinished,
+    })
+    .where(eq(aiGenerationBatches.id, batchId));
+
+  // ── the growing job-local memory ──────────────────────────────────────────
+  const concepts = [...(parseJsonArray(job.coveredConcepts) ?? []), ...acceptedConcepts];
+  const coveredConcepts = capConcepts(concepts);
+
+  // ── terminal decision ─────────────────────────────────────────────────────
+  const stall = await stallReason(job.id);
   let status: string;
   let errorCode: string | null = null;
   let errorMessage: string | null = null;
 
-  if (produced >= job.requestedCount) {
+  if (acceptedTotal >= job.requestedCount) {
     status = "succeeded";
-  } else if (!exhausted) {
-    // The model returned FEWER questions than asked (truncation); another round
-    // asks only for the remainder. Duplicates are never topped up — they stay
-    // visible and rejected.
-    status = "running";
-  } else if (produced === 0) {
-    status = "failed";
-    errorCode = "NO_CANDIDATES";
-    errorMessage = "The model returned no usable questions.";
-  } else {
+  } else if (stall === "covered") {
     status = "partial";
-    errorCode = "SHORTFALL";
-    errorMessage = `Produced ${produced} of ${job.requestedCount} after ${round} rounds.`;
+    errorCode = "SATURATED";
+    errorMessage = `The bank already covers this topic: ${acceptedTotal} of ${job.requestedCount} accepted, and the last two batches produced almost nothing new.`;
+  } else if (stall === "no_output") {
+    status = acceptedTotal > 0 ? "partial" : "failed";
+    errorCode = "NO_CANDIDATES";
+    errorMessage = "The model returned no usable questions for this topic.";
+  } else if (batchNo >= job.maxCalls) {
+    status = acceptedTotal > 0 ? "partial" : "failed";
+    errorCode = "MAX_CALLS";
+    errorMessage = `Reached the ${job.maxCalls}-call limit with ${acceptedTotal} of ${job.requestedCount} accepted.`;
+  } else {
+    status = "running";
   }
 
   await db()
@@ -513,49 +609,169 @@ async function generateRound(job: AiGenerationJob, deps: GenerationDeps): Promis
       validCount: produced,
       duplicateCount: duplicateTotal,
       duplicateSkipped: duplicateTotal,
-      backfillRound: round,
+      acceptedCount: acceptedTotal,
+      backfillRound: batchNo,
+      coveredConcepts: coveredConcepts.length > 0 ? JSON.stringify(coveredConcepts) : null,
       rawResponseKey: key,
       promptTokens,
       completionTokens,
       costUsd: estimateCostUsd(job.model, promptTokens, completionTokens),
-      startedAt: job.startedAt ?? startedAt,
-      finishedAt: status === "running" ? null : now,
-      durationMs: job.startedAt ? now - job.startedAt : now - startedAt,
+      finishedAt: status === "running" ? null : nowFinished,
+      durationMs: job.startedAt ? nowFinished - job.startedAt : nowFinished - startedAt,
       errorCode,
       errorMessage,
     })
     .where(eq(aiGenerationJobs.id, job.id));
 
-  logInfo("ai", `round ${round} done for ${job.id}`, {
+  logInfo("ai", `batch ${batchNo} done for ${job.id}`, {
     status,
-    asked: remaining,
+    asked: ask,
     stored: rows.length,
-    flaggedAsDuplicate: flagged,
+    acceptedThisBatch: acceptedConcepts.length,
+    flaggedThisBatch: flagged,
+    acceptedTotal,
     producedTotal: produced,
     requested: job.requestedCount,
+    invalidDropped: parsed.rejected.length,
+    saturationRate: SATURATION_RATE,
     maxTokens,
     completionTokens: response.completionTokens,
     outputBytes: response.text.length,
   });
 
-  await recordAudit(job.createdBy, "ai.job_round", "ai_job", job.id, null, {
-    round,
-    asked: remaining,
+  await recordAudit(job.createdBy, "ai.job_batch", "ai_job", job.id, null, {
+    batchNo,
+    asked: ask,
     stored: rows.length,
-    flaggedAsDuplicate: flagged,
-    producedTotal: produced,
+    accepted: acceptedConcepts.length,
+    flagged,
+    acceptedTotal,
     status,
   });
 
   return progressOf(await getJob(job.id));
 }
 
-async function failJob(jobId: string, code: string, message: string): Promise<void> {
-  logError("ai", `job ${jobId} failed`, { code, message });
+/** One retry when the provider itself says the failure is transient. */
+async function callWithRetry(
+  deps: GenerationDeps,
+  request: Parameters<LlmProvider["generate"]>[0],
+): Promise<Awaited<ReturnType<LlmProvider["generate"]>>> {
+  try {
+    return await deps.provider.generate(request);
+  } catch (error) {
+    if (error instanceof LlmError && error.retryable) {
+      logWarn("ai", "provider call failed — retrying once", {
+        code: error.code,
+        message: error.message,
+      });
+      return deps.provider.generate(request);
+    }
+    throw error;
+  }
+}
+
+/**
+ * The job's prompt context: what the BANK covers (built once at creation) plus
+ * what THIS JOB has already generated, so later batches cannot repeat them.
+ */
+function buildJobDigest(job: AiGenerationJob): string {
+  const bank = job.coverageDigest ?? "";
+  const concepts = parseJsonArray(job.coveredConcepts) ?? [];
+  if (concepts.length === 0) return bank;
+
+  const lines: string[] = [];
+  let used = 0;
+  for (const concept of concepts) {
+    const line = `- ${concept}`;
+    const cost = estimateTokens(`${line}\n`);
+    if (used + cost > JOB_CONCEPTS_MAX_TOKENS) {
+      lines.push(`- …and ${concepts.length - lines.length} more already-generated concepts`);
+      break;
+    }
+    lines.push(line);
+    used += cost;
+  }
+
+  return [
+    bank,
+    "",
+    `ALREADY GENERATED IN THIS JOB (do NOT repeat these; ${concepts.length} so far):`,
+    ...lines,
+  ].join("\n");
+}
+
+/** Trim the job-local concept list to its token budget, keeping the newest. */
+function capConcepts(concepts: string[]): string[] {
+  const kept: string[] = [];
+  let used = 0;
+  for (let i = concepts.length - 1; i >= 0; i--) {
+    const cost = estimateTokens(`- ${concepts[i]}\n`);
+    if (used + cost > JOB_CONCEPTS_MAX_TOKENS) break;
+    kept.unshift(concepts[i]!);
+    used += cost;
+  }
+  return kept;
+}
+
+/**
+ * Two consecutive batches that both yielded almost nothing new mean the job has
+ * stalled — either the bank already covers the topic or the model has stopped
+ * returning usable questions. Either way: stop rather than burn calls.
+ */
+async function stallReason(jobId: string): Promise<"covered" | "no_output" | null> {
+  const rows = await db()
+    .select({ produced: aiGenerationBatches.produced, accepted: aiGenerationBatches.accepted })
+    .from(aiGenerationBatches)
+    .where(and(eq(aiGenerationBatches.jobId, jobId), eq(aiGenerationBatches.status, "succeeded")))
+    .orderBy(desc(aiGenerationBatches.batchNo))
+    .limit(2);
+
+  if (rows.length < 2) return null;
+
+  const stalled = rows.every(
+    (row) => row.accepted === 0 || row.accepted / Math.max(1, row.produced) < SATURATION_RATE,
+  );
+  if (!stalled) return null;
+
+  return rows.every((row) => row.produced === 0) ? "no_output" : "covered";
+}
+
+async function finishJob(
+  jobId: string,
+  status: string,
+  errorCode: string | null = null,
+  errorMessage: string | null = null,
+): Promise<void> {
   await db()
     .update(aiGenerationJobs)
-    .set({ status: "failed", errorCode: code, errorMessage: message, finishedAt: nowMs() })
+    .set({ status, errorCode, errorMessage, finishedAt: nowMs() })
     .where(eq(aiGenerationJobs.id, jobId));
+}
+
+async function bumpCallCount(jobId: string, batchNo: number): Promise<void> {
+  await db()
+    .update(aiGenerationJobs)
+    .set({ backfillRound: batchNo })
+    .where(eq(aiGenerationJobs.id, jobId));
+}
+
+async function failBatch(
+  batchId: string,
+  startedAt: number,
+  errorCode: string,
+  errorMessage: string,
+): Promise<void> {
+  await db()
+    .update(aiGenerationBatches)
+    .set({
+      status: "failed",
+      errorCode,
+      errorMessage,
+      durationMs: nowMs() - startedAt,
+      finishedAt: nowMs(),
+    })
+    .where(eq(aiGenerationBatches.id, batchId));
 }
 
 /**
@@ -615,10 +831,31 @@ export async function listCandidates(
   return rows.map((row) => ({ ...row.candidate, model: row.model, jobTopic: row.jobTopic }));
 }
 
-/** All candidates of a job in batch order — the review screen's payload. */
+/** All live candidates of a job in batch order — the review screen's payload. */
 export async function listJobCandidates(jobId: string): Promise<CandidateWithJob[]> {
-  const rows = await listCandidates({ jobId, limit: 200 });
-  return rows.sort((a, b) => (a.batchIndex ?? 0) - (b.batchIndex ?? 0));
+  const rows = await db()
+    .select({
+      candidate: aiCandidates,
+      model: aiGenerationJobs.model,
+      jobTopic: aiGenerationJobs.topic,
+    })
+    .from(aiCandidates)
+    .innerJoin(aiGenerationJobs, eq(aiGenerationJobs.id, aiCandidates.jobId))
+    .where(and(eq(aiCandidates.jobId, jobId), eq(aiCandidates.superseded, 0)))
+    .limit(400);
+
+  return rows
+    .map((row) => ({ ...row.candidate, model: row.model, jobTopic: row.jobTopic }))
+    .sort((a, b) => (a.batchIndex ?? 0) - (b.batchIndex ?? 0));
+}
+
+/** Every internal call of a job, oldest first — the progress panel's payload. */
+export async function listJobBatches(jobId: string): Promise<AiGenerationBatch[]> {
+  return db()
+    .select()
+    .from(aiGenerationBatches)
+    .where(eq(aiGenerationBatches.jobId, jobId))
+    .orderBy(aiGenerationBatches.batchNo);
 }
 
 export async function getCandidate(id: string): Promise<AiCandidate> {
@@ -710,7 +947,15 @@ export async function commitJobToSet(
     setId = target.setId!;
   }
 
-  const candidates = (await listJobCandidates(jobId)).filter((candidate) => candidate.rejected === 0);
+  const kept = (await listJobCandidates(jobId)).filter((candidate) => candidate.rejected === 0);
+  /**
+   * D1 — auto-trim. Generation is allowed to overshoot the target (a batch is
+   * never a degenerate 1-question prompt), but the Q Set receives exactly the
+   * number that was asked for. The overflow stays in the review screen and can
+   * be swapped in later.
+   */
+  const candidates = kept.slice(0, Math.max(1, job.requestedCount));
+  const trimmed = kept.length - candidates.length;
 
   const promoted: CommitOutcome["promoted"] = [];
   const failed: CommitOutcome["failed"] = [];
@@ -781,6 +1026,7 @@ export async function commitJobToSet(
     setId,
     createdSet: createdSet?.id ?? null,
     promoted: promoted.length,
+    trimmedFromOvershoot: trimmed,
     duplicateOverrides,
     attached,
     attachSkipped,
@@ -791,6 +1037,7 @@ export async function commitJobToSet(
     setId,
     createdSet: createdSet?.id ?? null,
     promoted: promoted.length,
+    trimmedFromOvershoot: trimmed,
     duplicateOverrides,
     attached,
     failed: failed.length,

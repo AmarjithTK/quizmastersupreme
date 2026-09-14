@@ -5,8 +5,10 @@
  * is exactly why it is testable at all. What is verified here is the REVAMPED
  * contract:
  *
- *   1. "Ask for N, get N" — a short round is topped up by the next round.
- *   2. Duplicates are AUTO-FILTERED against the whole bank (never stored).
+ *   1. A job runs in SMALL INTERNAL BATCHES (default 25) and refills until the
+ *      accepted count reaches the target (PIPELINE-PLAN.md P0).
+ *   2. Duplicates are stored but arrive REJECTED BY DEFAULT, with the question
+ *      they matched — never hidden.
  *   3. The request budget comes from the count and the model's real output
  *      ceiling — not a hard-coded 8000 tokens.
  *   4. Generating NEVER writes to `questions`; only the explicit commit does.
@@ -25,6 +27,7 @@ import {
   createGenerationJob,
   getJob,
   listCandidates,
+  listJobBatches,
   listJobCandidates,
   outputBudgetFor,
   runGenerationStep,
@@ -114,16 +117,36 @@ async function cleanup(): Promise<void> {
   const jobs = await db().select({ id: schema.aiGenerationJobs.id }).from(schema.aiGenerationJobs);
   for (const job of jobs) {
     await db().delete(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, job.id)).run();
+    await db()
+      .delete(schema.aiGenerationBatches)
+      .where(eq(schema.aiGenerationBatches.jobId, job.id))
+      .run();
     await db().delete(schema.aiGenerationJobs).where(eq(schema.aiGenerationJobs.id, job.id)).run();
   }
   await db().delete(schema.questions).where(eq(schema.questions.topic, TOPIC)).run();
 }
 
-async function newJob(count = 3, model = "stub/model") {
+async function newJob(count = 3, model = "stub/model", batchSize?: number) {
   return createGenerationJob(
-    { topic: TOPIC, brief: "Write test questions.", requestedCount: count, model },
+    {
+      topic: TOPIC,
+      brief: "Write test questions.",
+      requestedCount: count,
+      model,
+      batchSize: batchSize ?? null,
+    },
     ACTOR,
   );
+}
+
+/** Step until the job is terminal, with a hard guard against a runaway loop. */
+async function drain(jobId: string, d: GenerationDeps, max = 40) {
+  let progress = await runGenerationStep(jobId, d);
+  let guard = 0;
+  while (!progress.done && guard++ < max) {
+    progress = await runGenerationStep(jobId, d);
+  }
+  return progress;
 }
 
 // ── §2.2 — the hard rule ─────────────────────────────────────────────────────
@@ -229,8 +252,7 @@ describe("generate-to-N", () => {
     expect(second.round).toBe(2);
   });
 
-  it("still delivers N rows when the topic is already covered — as rejected duplicates", async () => {
-    const job = await newJob(2);
+  it("stops early and says so when every batch is already in the bank", async () => {
     const { createQuestion } = await import("@/modules/questions");
     await createQuestion(
       {
@@ -252,25 +274,140 @@ describe("generate-to-N", () => {
       { status: "active" },
     );
 
-    // Both requested rows come back as questions — nothing is silently dropped.
+    // Every batch comes back as questions the bank already has.
+    const job = await newJob(2);
     const d = deps(
       envelope(question("Saturated topic question?"), question("Saturated topic question?")),
     );
 
-    const progress = await runGenerationStep(job.id, d);
+    const progress = await drain(job.id, d);
+
     expect(progress.done).toBe(true);
-    expect(progress.status).toBe("succeeded");
-    expect(progress.producedCount).toBe(2);
-    expect(progress.duplicateCount).toBe(2);
+    expect(progress.status).toBe("partial");
+    // Nothing was accepted, but the duplicates were NOT hidden.
+    expect(progress.acceptedCount).toBe(0);
+    expect(progress.producedCount).toBe(4);
+    expect(progress.duplicateCount).toBe(4);
+    // It stopped on the stall rule, not by burning every call.
+    expect(progress.round).toBeLessThan(job.maxCalls);
+
+    const row = await getJob(job.id);
+    expect(row.errorCode).toBe("SATURATED");
+    expect(row.errorMessage).toMatch(/covers this topic/i);
 
     const stored = await listJobCandidates(job.id);
-    expect(stored).toHaveLength(2);
-    // Every one of them is present, rejected by default, with the match shown.
+    expect(stored).toHaveLength(4);
     expect(stored.every((c) => c.rejected === 1)).toBe(true);
   });
 });
 
-// ── duplicate filtration ─────────────────────────────────────────────────────
+// ── the small-batch loop (PIPELINE-PLAN P0) ──────────────────────────────────
+
+describe("small-batch generation loop", () => {
+  /** 25 unique, clean questions per call — the classic large-job shape. */
+  const batchOf = (call: number, size = 25) =>
+    envelope(...Array.from({ length: size }, (_, i) => question(`Loop probe c${call} q${i}?`)));
+
+  it("splits a 100-question target into 25-question calls and refills to the target", async () => {
+    const job = await newJob(100, "stub/model", 25);
+    let calls = 0;
+
+    const d: GenerationDeps = {
+      provider: stubProvider(() => batchOf(++calls)),
+      storage: memoryStorage(),
+    };
+
+    const progress = await drain(job.id, d);
+
+    expect(progress.done).toBe(true);
+    expect(progress.status).toBe("succeeded");
+    expect(calls).toBe(4); // 100 ÷ 25
+    expect(progress.acceptedCount).toBe(100);
+    expect(progress.producedCount).toBe(100);
+    expect(progress.round).toBe(4);
+
+    // Every call left its own record with its own counts.
+    const batches = await listJobBatches(job.id);
+    expect(batches).toHaveLength(4);
+    expect(batches.map((b) => b.batchNo)).toEqual([1, 2, 3, 4]);
+    expect(batches.every((b) => b.asked === 25 && b.status === "succeeded")).toBe(true);
+    expect(batches.every((b) => b.produced === 25 && b.accepted === 25)).toBe(true);
+    expect(batches.every((b) => b.rawResponseKey != null && b.finishedAt != null)).toBe(true);
+  });
+
+  it("feeds the concepts accepted earlier in the job into the next prompt", async () => {
+    const job = await newJob(50, "stub/model", 25);
+    const prompts: string[] = [];
+    let calls = 0;
+
+    const d: GenerationDeps = {
+      provider: stubProvider((request) => {
+        calls++;
+        prompts.push(request.user);
+        return batchOf(calls);
+      }),
+      storage: memoryStorage(),
+    };
+
+    await drain(job.id, d);
+
+    // The first call has no job-local memory; the second one does.
+    expect(prompts[0]).not.toContain("ALREADY GENERATED IN THIS JOB");
+    expect(prompts[1]).toContain("ALREADY GENERATED IN THIS JOB");
+    expect(prompts[1]).toContain("loop probe c1 q0");
+  });
+
+  it("stops at the call cap and reports a partial rather than running forever", async () => {
+    const job = await newJob(100, "stub/model", 25);
+    let calls = 0;
+
+    const d: GenerationDeps = {
+      provider: stubProvider(() => envelope(question(`Cap probe call ${++calls}?`))),
+      storage: memoryStorage(),
+    };
+
+    const progress = await drain(job.id, d, 60);
+
+    expect(progress.done).toBe(true);
+    expect(progress.status).toBe("partial");
+    expect(progress.round).toBe(job.maxCalls);
+    expect(progress.acceptedCount).toBe(job.maxCalls);
+
+    const row = await getJob(job.id);
+    expect(row.errorCode).toBe("MAX_CALLS");
+    expect(row.errorMessage).toMatch(/call limit/i);
+  });
+
+  it("retries a retryable provider failure once before giving up", async () => {
+    const job = await newJob(25, "stub/model", 25);
+    let attempts = 0;
+
+    const d: GenerationDeps = {
+      provider: {
+        name: "flaky",
+        async generate(request) {
+          attempts++;
+          if (attempts === 1) {
+            throw new LlmError("Slow down.", { code: "RATE_LIMITED", retryable: true });
+          }
+          return {
+            text: batchOf(1),
+            model: request.model,
+            promptTokens: 10,
+            completionTokens: 10,
+            raw: {},
+          };
+        },
+      },
+      storage: memoryStorage(),
+    };
+
+    const progress = await drain(job.id, d);
+    expect(attempts).toBe(2);
+    expect(progress.status).toBe("succeeded");
+    expect(progress.acceptedCount).toBe(25);
+  });
+});
 
 describe("duplicates are shown, rejected by default, and overridable", () => {
   async function seedBankQuestion(stem: string) {
@@ -386,7 +523,7 @@ describe("duplicates are shown, rejected by default, and overridable", () => {
     const second = stored[1]!;
     expect(second.rejected).toBe(1);
     expect(second.dedupeStatus).toBe("exact_dup");
-    expect(second.dedupeReason).toMatch(/this batch/i);
+    expect(second.dedupeReason).toMatch(/in this job/i);
     // The match is its batch mate, not a bank row.
     expect(second.dedupeMatchedQuestionId).toBeNull();
     expect(second.dedupeMatchedStem).toBe(stored[0]!.stem);
@@ -507,6 +644,44 @@ describe("commitJobToSet", () => {
     expect(stored.committedAt).not.toBeNull();
   });
 
+  it("auto-trims an overshoot so the Q Set receives exactly the target (D1)", async () => {
+    const category = await createCategory({ title: "Trim Subject" }, ACTOR);
+    const set = await createSet({ categoryId: category.id, title: "Trim Set" }, ACTOR);
+
+    // Target 3, but the refill floor asks for 5 and the model complies with 5 —
+    // so the job succeeds with 5 accepted and the commit trims to 3.
+    const job = await newJob(3);
+    await runGenerationStep(
+      job.id,
+      deps(
+        envelope(
+          question("Trim alpha question?"),
+          question("Trim bravo question?"),
+          question("Trim charlie question?"),
+          question("Trim delta question?"),
+          question("Trim echo question?"),
+        ),
+      ),
+    );
+    const afterRun = await getJob(job.id);
+    expect(afterRun.status).toBe("succeeded");
+    expect(afterRun.acceptedCount).toBe(5);
+
+    const outcome = await commitJobToSet(job.id, ACTOR, { setId: set.id });
+    expect(outcome.promoted).toHaveLength(3);
+    expect(outcome.questionIds).toHaveLength(3);
+
+    const attached = await db()
+      .select({ questionId: schema.questionSetQuestions.questionId })
+      .from(schema.questionSetQuestions)
+      .where(eq(schema.questionSetQuestions.setId, set.id));
+    expect(attached).toHaveLength(3);
+
+    // The two overflow questions stay in the working set, accepted and unused.
+    const stored = await listJobCandidates(job.id);
+    expect(stored.filter((c) => c.rejected === 0)).toHaveLength(5);
+  });
+
   it("skips rejected candidates", async () => {
     const category = await createCategory({ title: "AI Reject Subject" }, ACTOR);
     const set = await createSet({ categoryId: category.id, title: "AI Reject Set" }, ACTOR);
@@ -542,8 +717,16 @@ describe("commitJobToSet", () => {
 // ── job creation validation ──────────────────────────────────────────────────
 
 describe("createGenerationJob validation", () => {
-  it("rejects a non-positive or oversized count", async () => {
+  it("rejects a non-positive count and anything past the configured ceiling", async () => {
     await expect(newJob(0)).rejects.toMatchObject({ code: "VALIDATION" });
-    await expect(newJob(51)).rejects.toMatchObject({ code: "VALIDATION" });
+    // Default ceiling is generation.max_requested = 300.
+    await expect(newJob(301)).rejects.toMatchObject({ code: "VALIDATION" });
+  });
+
+  it("honours a per-job batch size and derives the call cap from it", async () => {
+    const job = await newJob(100, "stub/model", 20);
+    expect(job.batchSize).toBe(20);
+    // ceil(100/20) = 5 planned calls, plus refill slack.
+    expect(job.maxCalls).toBeGreaterThanOrEqual(8);
   });
 });

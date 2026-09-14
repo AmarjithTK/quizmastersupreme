@@ -15,9 +15,19 @@ import { cn } from "@/lib/utils";
 
 type Settings = { provider: string; model: string };
 type Routing = { only: string[]; order: string[] };
+type Generation = {
+  batchSize: number;
+  maxRequested: number;
+  minRefill: number;
+  maxCalls: number;
+  countMode: "at_least_trim" | "exact";
+};
+type Limits = Record<"batchSize" | "maxRequested" | "minRefill" | "maxCalls", { min: number; max: number }>;
 type Props = {
   initial: Settings;
   initialRouting: Routing;
+  initialGeneration: Generation;
+  generationLimits: Limits;
   providers: string[];
   modelPresets: string[];
 };
@@ -34,9 +44,22 @@ function modeOf(routing: Routing): RoutingMode {
   return "none";
 }
 
-export function AiSettingsPanel({ initial, initialRouting, providers, modelPresets }: Props) {
+export function AiSettingsPanel({
+  initial,
+  initialRouting,
+  initialGeneration,
+  generationLimits,
+  providers,
+  modelPresets,
+}: Props) {
   const [provider, setProvider] = useState(initial.provider);
   const [model, setModel] = useState(initial.model);
+  // Kept as strings so the fields can be edited freely; parsed on save.
+  const [batchSize, setBatchSize] = useState(String(initialGeneration.batchSize));
+  const [maxRequested, setMaxRequested] = useState(String(initialGeneration.maxRequested));
+  const [minRefill, setMinRefill] = useState(String(initialGeneration.minRefill));
+  const [maxCalls, setMaxCalls] = useState(String(initialGeneration.maxCalls));
+  const [countMode, setCountMode] = useState(initialGeneration.countMode);
   const [mode, setMode] = useState<RoutingMode>(modeOf(initialRouting));
   const [slugs, setSlugs] = useState(
     initialRouting.only.length > 0
@@ -55,7 +78,12 @@ export function AiSettingsPanel({ initial, initialRouting, providers, modelPrese
         ? join(initialRouting.only)
         : join(initialRouting.order),
     );
-  }, [initial, initialRouting]);
+    setBatchSize(String(initialGeneration.batchSize));
+    setMaxRequested(String(initialGeneration.maxRequested));
+    setMinRefill(String(initialGeneration.minRefill));
+    setMaxCalls(String(initialGeneration.maxCalls));
+    setCountMode(initialGeneration.countMode);
+  }, [initial, initialRouting, initialGeneration]);
 
   async function save() {
     setSaving(true);
@@ -69,6 +97,13 @@ export function AiSettingsPanel({ initial, initialRouting, providers, modelPrese
           model: model.trim(),
           providerOnly: mode === "only" ? split(slugs) : [],
           providerOrder: mode === "order" ? split(slugs) : [],
+          generation: {
+            batchSize: Number(batchSize),
+            maxRequested: Number(maxRequested),
+            minRefill: Number(minRefill),
+            maxCalls: Number(maxCalls),
+            countMode,
+          },
         }),
       });
       const body = (await res.json()) as {
@@ -76,7 +111,10 @@ export function AiSettingsPanel({ initial, initialRouting, providers, modelPrese
         error?: { message: string };
       };
       if (!res.ok) throw new Error(body.error?.message ?? "Could not save settings.");
-      setNotice({ tone: "ok", text: `Saved — new jobs will use ${body.settings!.model}.` });
+      setNotice({
+        tone: "ok",
+        text: `Saved — new jobs use ${body.settings!.model} in batches of ${batchSize}.`,
+      });
     } catch (e) {
       setNotice({ tone: "err", text: e instanceof Error ? e.message : "Could not save settings." });
     } finally {
@@ -193,6 +231,73 @@ export function AiSettingsPanel({ initial, initialRouting, providers, modelPrese
           className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-900/10"
         />
       )}
+
+      <hr className="mt-6 border-slate-200" />
+
+      <h3 className="mt-5 text-sm font-semibold text-slate-800">Generation pipeline</h3>
+      <p className="mt-1 text-xs text-slate-500">
+        One job is generated in small internal batches, filtered after every batch and refilled
+        until the target is met. The batch size is also overridable per job on the Generate screen.
+      </p>
+
+      <div className="mt-4 grid grid-cols-2 gap-3">
+        {(
+          [
+            ["batchSize", "Batch size (per call)", batchSize, setBatchSize, "25"],
+            ["maxRequested", "Max target per job", maxRequested, setMaxRequested, "300"],
+            ["minRefill", "Min refill ask", minRefill, setMinRefill, "5"],
+            ["maxCalls", "Max calls per job", maxCalls, setMaxCalls, "20"],
+          ] as Array<[keyof Limits, string, string, (v: string) => void, string]>
+        ).map(([key, label, value, setValue, placeholder]) => (
+          <label key={key} className="flex flex-col gap-1 text-xs font-medium text-slate-600">
+            {label}
+            <input
+              type="number"
+              min={generationLimits[key].min}
+              max={generationLimits[key].max}
+              value={value}
+              placeholder={placeholder}
+              onChange={(e) => setValue(e.target.value)}
+              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-900/10"
+            />
+            <span className="text-[10px] font-normal text-slate-400">
+              {generationLimits[key].min}–{generationLimits[key].max}
+            </span>
+          </label>
+        ))}
+      </div>
+
+      <fieldset className="mt-4">
+        <legend className="text-xs font-medium text-slate-600">When the target is reached</legend>
+        <div className="mt-1 flex flex-wrap gap-2">
+          {(
+            [
+              ["at_least_trim", "Overshoot, then add exactly the target"],
+              ["exact", "Ask only for the remainder"],
+            ] as Array<["at_least_trim" | "exact", string]>
+          ).map(([value, label]) => (
+            <label
+              key={value}
+              className={[
+                "cursor-pointer rounded-lg border px-3 py-1.5 text-xs font-medium",
+                countMode === value
+                  ? "border-slate-900 bg-slate-900 text-white"
+                  : "border-slate-300 bg-white text-slate-600 hover:bg-slate-50",
+              ].join(" ")}
+            >
+              <input
+                type="radio"
+                name="count-mode"
+                value={value}
+                checked={countMode === value}
+                onChange={() => setCountMode(value)}
+                className="sr-only"
+              />
+              {label}
+            </label>
+          ))}
+        </div>
+      </fieldset>
 
       <div className="mt-5 flex items-center gap-3">
         <button

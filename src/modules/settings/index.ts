@@ -188,6 +188,113 @@ export async function updateAiGenerationSettings(
   return getAiGenerationSettings();
 }
 
+// ── Generation pipeline knobs (PIPELINE-PLAN.md §13) ─────────────────────────
+
+export type CountMode = "at_least_trim" | "exact";
+
+export type GenerationSettings = {
+  /** Questions asked per internal call. 25 is the measured sweet spot. */
+  batchSize: number;
+  /** Largest job a single request may target. */
+  maxRequested: number;
+  /** Never ask for fewer than this on a refill, so the last prompt stays sane. */
+  minRefill: number;
+  /** Hard cap on provider calls per job — refills can never run away. */
+  maxCalls: number;
+  /** `at_least_trim` aims for >= target and trims at commit; `exact` keeps calling. */
+  countMode: CountMode;
+};
+
+export const GENERATION_DEFAULTS: GenerationSettings = {
+  batchSize: 25,
+  maxRequested: 300,
+  minRefill: 5,
+  maxCalls: 20,
+  countMode: "at_least_trim",
+};
+
+export const GENERATION_LIMITS = {
+  batchSize: { min: 5, max: 50 },
+  maxRequested: { min: 1, max: 1000 },
+  minRefill: { min: 1, max: 25 },
+  maxCalls: { min: 1, max: 100 },
+} as const;
+
+const GENERATION_KEYS: Record<keyof GenerationSettings, string> = {
+  batchSize: "generation.batch_size",
+  maxRequested: "generation.max_requested",
+  minRefill: "generation.min_refill",
+  maxCalls: "generation.max_calls",
+  countMode: "generation.count_mode",
+};
+
+function clampInt(value: unknown, field: keyof typeof GENERATION_LIMITS): number | null {
+  const limits = GENERATION_LIMITS[field];
+  if (typeof value !== "number" || !Number.isInteger(value)) return null;
+  if (value < limits.min || value > limits.max) return null;
+  return value;
+}
+
+export async function getGenerationSettings(): Promise<GenerationSettings> {
+  const rows = await db()
+    .select({ key: appSettings.key, value: appSettings.value })
+    .from(appSettings)
+    .where(inArray(appSettings.key, Object.values(GENERATION_KEYS)));
+
+  const stored = new Map(rows.map((row) => [row.key, row.value]));
+  const result: GenerationSettings = { ...GENERATION_DEFAULTS };
+
+  for (const [field, key] of Object.entries(GENERATION_KEYS) as Array<
+    [keyof GenerationSettings, string]
+  >) {
+    const raw = stored.get(key);
+    if (raw === undefined) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (field === "countMode") {
+      if (parsed === "at_least_trim" || parsed === "exact") result.countMode = parsed;
+      continue;
+    }
+    const value = clampInt(parsed, field);
+    if (value !== null) result[field] = value;
+  }
+
+  return result;
+}
+
+export async function updateGenerationSettings(
+  patch: Partial<GenerationSettings>,
+  actorId: string,
+): Promise<GenerationSettings> {
+  for (const [field, value] of Object.entries(patch) as Array<
+    [keyof GenerationSettings, GenerationSettings[keyof GenerationSettings] | undefined]
+  >) {
+    if (value === undefined) continue;
+
+    if (field === "countMode") {
+      if (value !== "at_least_trim" && value !== "exact") {
+        throw new Error(`Unknown count mode "${String(value)}".`);
+      }
+      await setSetting(GENERATION_KEYS.countMode, value, actorId);
+      continue;
+    }
+
+    const limits = GENERATION_LIMITS[field];
+    const number = clampInt(value, field);
+    if (number === null) {
+      throw new Error(
+        `${field} must be an integer between ${limits.min} and ${limits.max}.`,
+      );
+    }
+    await setSetting(GENERATION_KEYS[field], number, actorId);
+  }
+  return getGenerationSettings();
+}
+
 // ── OpenRouter provider routing (provider.only / provider.order) ─────────────
 
 export type ProviderRouting = {

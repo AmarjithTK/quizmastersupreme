@@ -50,6 +50,13 @@
       "when": 1789530000000,
       "tag": "0006_candidate_dedupe",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1789540000000,
+      "tag": "0007_generation_batches",
+      "breakpoints": true
     }
   ]
 }
