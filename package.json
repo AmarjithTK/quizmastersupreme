@@ -1,0 +1,50 @@
+{
+  "name": "quizmaster-supreme",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.26.0",
+  "dependencies": {
+    "@vinext/cloudflare": "latest",
+    "clsx": "^2.1.1",
+    "drizzle-orm": "^0.45.2",
+    "lucide-react": "^1.45.0",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-server-dom-webpack": "latest",
+    "tailwind-merge": "^3.7.0",
+    "vinext": "latest",
+    "zod": "^4.6.4"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "latest",
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@tailwindcss/postcss": "latest",
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "latest",
+    "@vitejs/plugin-rsc": "latest",
+    "drizzle-kit": "^0.31.10",
+    "tailwindcss": "latest",
+    "tsx": "^4.23.13",
+    "typescript": "latest",
+    "vite": "latest",
+    "vitest": "^5.0.0",
+    "wrangler": "latest"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vinext dev",
+    "build": "vinext build",
+    "start": "wrangler dev --config dist/server/wrangler.json",
+    "deploy": "vinext-cloudflare deploy --config dist/server/wrangler.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate:local": "wrangler d1 migrations apply quizmaster-supreme-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply quizmaster-supreme-db --remote",
+    "db:reset:local": "rm -rf .wrangler/state/v3/d1 && pnpm db:migrate:local",
+    "seed": "tsx scripts/seed.ts",
+    "reindex:fts": "tsx scripts/reindex-fts.ts"
+  }
+}

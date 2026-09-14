@@ -1,0 +1,82 @@
+[
+  {
+    "slug": "tech-quiz",
+    "title": "Tech Quiz",
+    "subtitle": "Computers, IT & Cyber",
+    "icon": "Cpu",
+    "accentColor": "sky",
+    "sortOrder": 10,
+    "status": "published",
+    "description": "Kerala State IT quizzes, previous year papers, mock tests and expected questions."
+  },
+  {
+    "slug": "physics",
+    "title": "Physics",
+    "subtitle": "Motion, energy & matter",
+    "icon": "Atom",
+    "accentColor": "violet",
+    "sortOrder": 20,
+    "status": "published",
+    "description": "Mechanics, optics, thermodynamics and modern physics."
+  },
+  {
+    "slug": "chemistry",
+    "title": "Chemistry",
+    "subtitle": "Elements & reactions",
+    "icon": "FlaskConical",
+    "accentColor": "emerald",
+    "sortOrder": 30,
+    "status": "published",
+    "description": "Physical, organic and inorganic chemistry question sets."
+  },
+  {
+    "slug": "maths",
+    "title": "Maths",
+    "subtitle": "Algebra to calculus",
+    "icon": "Sigma",
+    "accentColor": "amber",
+    "sortOrder": 40,
+    "status": "published",
+    "description": "Arithmetic, algebra, geometry, trigonometry and calculus."
+  },
+  {
+    "slug": "biology",
+    "title": "Biology",
+    "subtitle": "Life sciences",
+    "icon": "Dna",
+    "accentColor": "rose",
+    "sortOrder": 50,
+    "status": "published",
+    "description": "Botany, zoology, human physiology and genetics."
+  },
+  {
+    "slug": "general-science",
+    "title": "General Science",
+    "subtitle": "Everyday science",
+    "icon": "Microscope",
+    "accentColor": "teal",
+    "sortOrder": 60,
+    "status": "published",
+    "description": "Mixed science questions for competitive exams."
+  },
+  {
+    "slug": "finance",
+    "title": "Finance",
+    "subtitle": "Banking & economy",
+    "icon": "IndianRupee",
+    "accentColor": "lime",
+    "sortOrder": 70,
+    "status": "published",
+    "description": "Banking awareness, Indian economy and financial literacy."
+  },
+  {
+    "slug": "general-knowledge",
+    "title": "General Knowledge",
+    "subtitle": "India & the world",
+    "icon": "Globe",
+    "accentColor": "orange",
+    "sortOrder": 80,
+    "status": "published",
+    "description": "Static GK, current affairs and Kerala-specific general knowledge."
+  }
+]

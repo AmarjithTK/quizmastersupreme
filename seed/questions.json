@@ -1,0 +1,170 @@
+[
+  {
+    "setSlugs": ["operating-systems-basics", "kerala-state-mock-1"],
+    "stem": "Which organisation developed the Multics operating system?",
+    "options": [
+      { "key": "A", "body": "IBM" },
+      { "key": "B", "body": "MIT, General Electric and Bell Labs" },
+      { "key": "C", "body": "Xerox PARC" },
+      { "key": "D", "body": "Microsoft" }
+    ],
+    "correctOptionKey": "B",
+    "explanation": "Multics was a joint project between MIT, General Electric and Bell Labs.",
+    "backstory": "### Project MAC\n\nMultics (Multiplexed Information and Computing Service) was a pioneering **time-sharing** operating system begun in 1964 as a joint effort by MIT, General Electric and Bell Labs.\n\n| Year | Milestone |\n|------|-----------|\n| 1964 | Project MAC begins at MIT |\n| 1969 | Bell Labs withdraws from the project |\n| 1970s | Multics enters commercial service |\n\n> Bell Labs' withdrawal in 1969 freed Ken Thompson and Dennis Ritchie to build something simpler — which became **Unix**.\n\nMultics introduced many ideas that later became standard: hierarchical file systems, dynamic linking and ring-based security.\n\n**Sources**\n- [Multics history — MIT](https://example.org/multics)",
+    "difficulty": "medium",
+    "topic": "Operating Systems",
+    "tags": ["history", "multics", "time-sharing"],
+    "year": 2025,
+    "examBody": "Kerala PSC",
+    "source": "Standard OS textbooks"
+  },
+  {
+    "setSlugs": ["operating-systems-basics", "kerala-state-mock-1", "previous-year-2025"],
+    "stem": "Who created the Linux kernel?",
+    "options": [
+      { "key": "A", "body": "Richard Stallman" },
+      { "key": "B", "body": "Linus Torvalds" },
+      { "key": "C", "body": "Ken Thompson" },
+      { "key": "D", "body": "Andrew Tanenbaum" }
+    ],
+    "correctOptionKey": "B",
+    "explanation": "Linus Torvalds released the first Linux kernel in 1991 while a student at Helsinki.",
+    "backstory": "In 1991 **Linus Torvalds**, then a 21-year-old student at the University of Helsinki, began writing a free kernel as a hobby project. He announced it on the `comp.os.minix` newsgroup with the now-famous line that it would \"probably never be anything big and professional\".\n\nThe timing was fortunate. The GNU project had been building a complete free operating system since 1983 but lacked a working kernel. Combining GNU's userland with Torvalds' kernel produced a complete, free operating system — which is why the technically precise name for the whole system is **GNU/Linux**.\n\n**Sources**\n- [Linux 0.01 release notes](https://example.org/linux-0-01)",
+    "difficulty": "easy",
+    "topic": "Operating Systems",
+    "tags": ["linux", "history"],
+    "year": 2025,
+    "examBody": "Kerala PSC",
+    "source": "Standard OS textbooks"
+  },
+  {
+    "setSlugs": ["operating-systems-basics", "previous-year-2025"],
+    "stem": "In which year was the first version of the Linux kernel released?",
+    "options": [
+      { "key": "A", "body": "1989" },
+      { "key": "B", "body": "1991" },
+      { "key": "C", "body": "1993" },
+      { "key": "D", "body": "1985" }
+    ],
+    "correctOptionKey": "B",
+    "explanation": "Version 0.01 of the Linux kernel was released in September 1991.",
+    "backstory": "The first public release, **version 0.01**, appeared in September 1991. It was not self-hosting: it required Minix to be compiled and could not run GNU tools yet.\n\nVersion 0.02 followed within weeks, and by 1994 version 1.0 had been released under the GNU General Public License. That licensing decision is the single biggest reason Linux became the dominant kernel it is today — it allowed anyone to use, study, modify and redistribute it.",
+    "difficulty": "easy",
+    "topic": "Operating Systems",
+    "tags": ["linux", "history", "dates"],
+    "year": 2025,
+    "examBody": "Kerala PSC"
+  },
+  {
+    "setSlugs": ["operating-systems-basics"],
+    "stem": "Who founded the GNU Project?",
+    "options": [
+      { "key": "A", "body": "Linus Torvalds" },
+      { "key": "B", "body": "Richard Stallman" },
+      { "key": "C", "body": "Eric Raymond" },
+      { "key": "D", "body": "Bruce Perens" }
+    ],
+    "correctOptionKey": "B",
+    "explanation": "Richard Stallman announced the GNU Project in 1983.",
+    "backstory": "**Richard Stallman** announced the GNU Project in September 1983, with the goal of creating a completely free Unix-like operating system. GNU is a recursive acronym for \"GNU's Not Unix\".\n\nStallman also wrote the **GNU General Public License**, the copyleft licence that guarantees end users the freedom to run, study, share and modify software. The Free Software Foundation, which he founded in 1985, stewards both.",
+    "difficulty": "easy",
+    "topic": "Operating Systems",
+    "tags": ["gnu", "free-software", "history"]
+  },
+  {
+    "setSlugs": ["operating-systems-basics"],
+    "stem": "What is the name of the Linux mascot?",
+    "options": [
+      { "key": "A", "body": "Duke" },
+      { "key": "B", "body": "Tux" },
+      { "key": "C", "body": "Beastie" },
+      { "key": "D", "body": "Wilber" }
+    ],
+    "correctOptionKey": "B",
+    "explanation": "Tux the penguin is the official Linux mascot.",
+    "backstory": "**Tux** the penguin was created by Larry Ewing in 1996 after Linus Torvalds mentioned that he had been bitten by a penguin at a zoo in Canberra.\n\nThe other options are real mascots too, which is what makes this a good distractor set:\n\n- **Duke** is the Java mascot\n- **Beastie** is the BSD daemon\n- **Wilber** is the GIMP mascot",
+    "difficulty": "easy",
+    "topic": "Operating Systems",
+    "tags": ["linux", "mascot", "trivia"]
+  },
+  {
+    "setSlugs": ["units-and-measurement", "physics-mock-1"],
+    "stem": "What is the SI unit of force?",
+    "options": [
+      { "key": "A", "body": "joule" },
+      { "key": "B", "body": "newton" },
+      { "key": "C", "body": "pascal" },
+      { "key": "D", "body": "watt" }
+    ],
+    "correctOptionKey": "B",
+    "explanation": "Force is measured in newtons, where 1 N = 1 kg·m/s².",
+    "backstory": "The **newton** is the SI unit of force, named after Isaac Newton. One newton is the force required to accelerate a mass of one kilogram at one metre per second squared.\n\nThe distractors are all SI derived units from the same family, so it pays to know what each one measures:\n\n| Unit | Quantity |\n|------|----------|\n| newton (N) | force |\n| joule (J) | energy |\n| pascal (Pa) | pressure |\n| watt (W) | power |",
+    "difficulty": "easy",
+    "topic": "Mechanics",
+    "tags": ["si-units", "force"]
+  },
+  {
+    "setSlugs": ["physics-mock-1", "everyday-science-1"],
+    "stem": "What is the approximate speed of light in a vacuum?",
+    "options": [
+      { "key": "A", "body": "3 × 10⁶ m/s" },
+      { "key": "B", "body": "3 × 10⁸ m/s" },
+      { "key": "C", "body": "3 × 10¹⁰ m/s" },
+      { "key": "D", "body": "3 × 10⁵ m/s" }
+    ],
+    "correctOptionKey": "B",
+    "explanation": "Light travels at approximately 299,792,458 m/s, or about 3 × 10⁸ m/s.",
+    "backstory": "The speed of light in a vacuum is exactly **299,792,458 metres per second**. Since 1983 this value has been *defined*, not measured — the metre itself is defined as the distance light travels in 1/299,792,458 of a second.\n\nThat is why the constant is written as `c = 299792458 m/s` with no uncertainty. The commonly used approximation is 3 × 10⁸ m/s, which is accurate to about 0.07%.",
+    "difficulty": "easy",
+    "topic": "Optics",
+    "tags": ["constants", "light"]
+  },
+  {
+    "setSlugs": ["periodic-table-basics"],
+    "stem": "What is the chemical symbol for gold?",
+    "options": [
+      { "key": "A", "body": "Go" },
+      { "key": "B", "body": "Gd" },
+      { "key": "C", "body": "Au" },
+      { "key": "D", "body": "Ag" }
+    ],
+    "correctOptionKey": "C",
+    "explanation": "Gold's symbol is Au, from the Latin 'aurum'.",
+    "backstory": "Gold's symbol is **Au**, from the Latin *aurum*, meaning \"shining dawn\". Several element symbols come from Latin names rather than English ones — which is the single most common source of error in this topic:\n\n| Element | Symbol | Latin |\n|---------|--------|-------|\n| Gold | Au | aurum |\n| Silver | Ag | argentum |\n| Iron | Fe | ferrum |\n| Lead | Pb | plumbum |\n| Sodium | Na | natrium |\n| Potassium | K | kalium |",
+    "difficulty": "easy",
+    "topic": "Periodic Table",
+    "tags": ["elements", "symbols"]
+  },
+  {
+    "setSlugs": ["everyday-science-1"],
+    "stem": "Which is the largest planet in the Solar System?",
+    "options": [
+      { "key": "A", "body": "Saturn" },
+      { "key": "B", "body": "Jupiter" },
+      { "key": "C", "body": "Neptune" },
+      { "key": "D", "body": "Earth" }
+    ],
+    "correctOptionKey": "B",
+    "explanation": "Jupiter is the largest planet, with a mass greater than all other planets combined.",
+    "backstory": "**Jupiter** is the largest planet in the Solar System. Its mass is about 2.5 times the combined mass of every other planet, and its volume could hold more than 1,300 Earths.\n\nJupiter is a gas giant with no solid surface. Its most famous feature, the **Great Red Spot**, is a storm larger than Earth that has been observed for at least 190 years and possibly far longer.",
+    "difficulty": "easy",
+    "topic": "Astronomy",
+    "tags": ["solar-system", "planets"]
+  },
+  {
+    "setSlugs": ["human-body-systems"],
+    "stem": "Which organelle is known as the powerhouse of the cell?",
+    "options": [
+      { "key": "A", "body": "Ribosome" },
+      { "key": "B", "body": "Mitochondrion" },
+      { "key": "C", "body": "Nucleus" },
+      { "key": "D", "body": "Golgi apparatus" }
+    ],
+    "correctOptionKey": "B",
+    "explanation": "Mitochondria generate most of the cell's ATP, its chemical energy currency.",
+    "backstory": "**Mitochondria** produce adenosine triphosphate (ATP) through cellular respiration, which is why they are called the powerhouse of the cell.\n\nThey have their own circular DNA, separate from the nucleus, and are inherited almost exclusively from the mother. This is strong evidence for the **endosymbiotic theory** — the idea that mitochondria were once free-living bacteria that were engulfed by an ancestral cell and became permanent residents.",
+    "difficulty": "easy",
+    "topic": "Cell Biology",
+    "tags": ["organelles", "mitochondria"]
+  }
+]

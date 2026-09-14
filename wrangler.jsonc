@@ -1,0 +1,52 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "quizmaster-supreme",
+  "compatibility_date": "2026-09-14",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "vinext/server/fetch-handler",
+  "assets": {
+    "directory": "dist/client",
+    "not_found_handling": "none",
+    "binding": "ASSETS"
+  },
+
+  // ─── M0–M6 (v0.1): D1 is the only binding we need. ───────────────────────
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "quizmaster-supreme-db",
+      // Placeholder. Replace with the UUID from `wrangler d1 create
+      // quizmaster-supreme-db` before deploying. Local dev ignores it.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // ─── Uncomment as each milestone lands (see PLAN.md §20). ────────────────
+  // Leaving these wired before their resources exist breaks local dev.
+  //
+  // M10 — AI generation pipeline:
+  // "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "quizmaster-supreme-assets" }],
+  // "queues": {
+  //   "producers": [{ "binding": "AI_JOBS", "queue": "quizmaster-supreme-ai-jobs" }],
+  //   "consumers": [{
+  //     "queue": "quizmaster-supreme-ai-jobs",
+  //     "max_batch_size": 1,
+  //     "max_batch_timeout": 5,
+  //     "max_retries": 2,
+  //     "dead_letter_queue": "quizmaster-supreme-ai-jobs-dlq"
+  //   }]
+  // },
+  //
+  // M12 — semantic dedupe:
+  // "vectorize": [{ "binding": "VECTORIZE", "index_name": "quizmaster-supreme-questions" }],
+  // "ai": { "binding": "AI" },
+
+  "vars": {
+    "APP_ENV": "development",
+    "DEFAULT_GENERATION_MODEL": "anthropic/claude-sonnet-4.5",
+    "EMBEDDING_MODEL": "@cf/baai/bge-m3"
+  },
+
+  "observability": { "enabled": true }
+}

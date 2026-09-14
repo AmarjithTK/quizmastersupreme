@@ -1,0 +1,139 @@
+[
+  {
+    "categorySlug": "tech-quiz",
+    "slug": "kerala-state-mock-1",
+    "title": "Kerala State Mock Set 1",
+    "groupLabel": "Kerala State",
+    "description": "Full-length mock paper modelled on the Kerala State IT quiz pattern.",
+    "mode": "mock",
+    "difficulty": "medium",
+    "timeLimitSeconds": 1800,
+    "questionLimit": 50,
+    "sortOrder": 10,
+    "status": "published"
+  },
+  {
+    "categorySlug": "tech-quiz",
+    "slug": "kerala-state-mock-2",
+    "title": "Kerala State Mock Set 2",
+    "groupLabel": "Kerala State",
+    "description": "Second full-length mock paper.",
+    "mode": "mock",
+    "difficulty": "medium",
+    "timeLimitSeconds": 1800,
+    "questionLimit": 50,
+    "sortOrder": 20,
+    "status": "published"
+  },
+  {
+    "categorySlug": "tech-quiz",
+    "slug": "previous-year-2025",
+    "title": "Previous Year Questions 2025",
+    "groupLabel": "Previous Year",
+    "description": "Questions asked in the 2025 Kerala State IT quiz.",
+    "mode": "practice",
+    "difficulty": "medium",
+    "sortOrder": 30,
+    "status": "published"
+  },
+  {
+    "categorySlug": "tech-quiz",
+    "slug": "operating-systems-basics",
+    "title": "Operating Systems Basics",
+    "groupLabel": "Topic Practice",
+    "description": "History and core concepts of operating systems.",
+    "mode": "practice",
+    "difficulty": "easy",
+    "sortOrder": 40,
+    "status": "published"
+  },
+  {
+    "categorySlug": "physics",
+    "slug": "physics-mock-1",
+    "title": "Physics Mock Set 1",
+    "groupLabel": "Mock Tests",
+    "description": "Mixed physics mock paper.",
+    "mode": "mock",
+    "difficulty": "medium",
+    "timeLimitSeconds": 1200,
+    "sortOrder": 10,
+    "status": "published"
+  },
+  {
+    "categorySlug": "physics",
+    "slug": "units-and-measurement",
+    "title": "Units and Measurement",
+    "groupLabel": "Topic Practice",
+    "description": "SI units, dimensions and measurement precision.",
+    "mode": "practice",
+    "difficulty": "easy",
+    "sortOrder": 20,
+    "status": "published"
+  },
+  {
+    "categorySlug": "chemistry",
+    "slug": "periodic-table-basics",
+    "title": "Periodic Table Basics",
+    "groupLabel": "Topic Practice",
+    "description": "Groups, periods and periodic trends.",
+    "mode": "practice",
+    "difficulty": "easy",
+    "sortOrder": 10,
+    "status": "published"
+  },
+  {
+    "categorySlug": "biology",
+    "slug": "human-body-systems",
+    "title": "Human Body Systems",
+    "groupLabel": "Topic Practice",
+    "description": "Circulatory, respiratory, nervous and digestive systems.",
+    "mode": "practice",
+    "difficulty": "easy",
+    "sortOrder": 10,
+    "status": "published"
+  },
+  {
+    "categorySlug": "general-science",
+    "slug": "everyday-science-1",
+    "title": "Everyday Science Set 1",
+    "groupLabel": "Topic Practice",
+    "description": "Science you meet in daily life.",
+    "mode": "practice",
+    "difficulty": "easy",
+    "sortOrder": 10,
+    "status": "published"
+  },
+  {
+    "categorySlug": "maths",
+    "slug": "arithmetic-warmup",
+    "title": "Arithmetic Warm-up",
+    "groupLabel": "Topic Practice",
+    "description": "Percentages, ratios and averages.",
+    "mode": "practice",
+    "difficulty": "easy",
+    "sortOrder": 10,
+    "status": "published"
+  },
+  {
+    "categorySlug": "finance",
+    "slug": "banking-awareness-1",
+    "title": "Banking Awareness Set 1",
+    "groupLabel": "Topic Practice",
+    "description": "RBI, banking terminology and Indian financial institutions.",
+    "mode": "practice",
+    "difficulty": "medium",
+    "sortOrder": 10,
+    "status": "published"
+  },
+  {
+    "categorySlug": "general-knowledge",
+    "slug": "kerala-gk-1",
+    "title": "Kerala GK Set 1",
+    "groupLabel": "Topic Practice",
+    "description": "Kerala history, geography and culture.",
+    "mode": "practice",
+    "difficulty": "easy",
+    "sortOrder": 10,
+    "status": "published"
+  }
+]

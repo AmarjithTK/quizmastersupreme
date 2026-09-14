@@ -1,0 +1,8 @@
+# pnpm 11 reads settings from here rather than package.json's "pnpm" field.
+#
+# workerd and esbuild each install a platform binary via a postinstall script.
+# pnpm blocks lifecycle scripts by default, so without this allowlist
+# `wrangler dev` fails with a missing workerd binary.
+allowBuilds:
+  esbuild: true
+  workerd: true
