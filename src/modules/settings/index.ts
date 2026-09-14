@@ -200,3 +200,64 @@ export async function updateAiGenerationSettings(
   }
   return getAiGenerationSettings();
 }
+
+// ── OpenRouter provider routing (provider.only / provider.order) ─────────────
+
+export type ProviderRouting = {
+  /** Allow-list of provider slugs. Empty = any provider may serve. */
+  only: string[];
+  /** Priority order of provider slugs. Empty = OpenRouter default order. */
+  order: string[];
+};
+
+const ROUTING_ONLY_KEY = "ai.provider_only";
+const ROUTING_ORDER_KEY = "ai.provider_order";
+
+function parseSlugList(raw: string | undefined): string[] {
+  if (raw == null) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed.filter((x): x is string => typeof x === "string" && /^[a-z0-9][a-z0-9_-]*$/.test(x));
+    }
+  } catch {
+    // fall through
+  }
+  return [];
+}
+
+export async function getProviderRouting(): Promise<ProviderRouting> {
+  const rows = await db()
+    .select({ key: appSettings.key, value: appSettings.value })
+    .from(appSettings)
+    .where(inArray(appSettings.key, [ROUTING_ONLY_KEY, ROUTING_ORDER_KEY]));
+  const stored = new Map(rows.map((row) => [row.key, row.value]));
+  return { only: parseSlugList(stored.get(ROUTING_ONLY_KEY)), order: parseSlugList(stored.get(ROUTING_ORDER_KEY)) };
+}
+
+/**
+ * Persist routing. Slugs are validated (lowercase, `[a-z0-9_-]`); duplicates
+ * are dropped. Only the two allowed shapes are ever written — nothing else in
+ * the OpenRouter routing schema is touched (no sorting/latency/pricing).
+ */
+export async function updateProviderRouting(
+  patch: Partial<ProviderRouting>,
+  actorId: string,
+): Promise<ProviderRouting> {
+  const clean = (slugs: string[] | undefined): string[] | undefined => {
+    if (slugs === undefined) return undefined;
+    const uniq = [...new Set(slugs.map((s) => s.trim().toLowerCase()).filter(Boolean))];
+    for (const slug of uniq) {
+      if (!/^[a-z0-9][a-z0-9_-]*$/.test(slug)) {
+        throw new Error(`Invalid provider slug "${slug}".`);
+      }
+    }
+    return uniq;
+  };
+
+  const only = clean(patch.only);
+  const order = clean(patch.order);
+  if (only !== undefined) await setSetting(ROUTING_ONLY_KEY, only, actorId);
+  if (order !== undefined) await setSetting(ROUTING_ORDER_KEY, order, actorId);
+  return getProviderRouting();
+}

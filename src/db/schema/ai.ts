@@ -32,6 +32,14 @@ export const aiGenerationJobs = sqliteTable(
     /** JSON array. */
     avoidTopics: text("avoid_topics"),
 
+    /**
+     * OpenRouter provider routing (M14+). JSON arrays of provider slugs.
+     * `only` = allow-list; `order` = priority. Emptied = OpenRouter default
+     * routing. See provider.only / provider.order in the OpenRouter docs.
+     */
+    providerOnly: text("provider_only"),
+    providerOrder: text("provider_order"),
+
     provider: text("provider").notNull().default("openrouter"),
     model: text("model").notNull(),
     temperature: real("temperature"),

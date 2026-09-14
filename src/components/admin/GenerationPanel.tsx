@@ -28,6 +28,8 @@ type Job = {
   costUsd: number | null;
   errorCode: string | null;
   errorMessage: string | null;
+  providerOnly: string | null;
+  providerOrder: string | null;
   createdAt: number;
 };
 
@@ -296,6 +298,14 @@ export function GenerationPanel({
                   asked {job.requestedCount} · produced {job.producedCount} · valid {job.validCount} · dup{" "}
                   {job.duplicateCount}
                   {job.costUsd != null && ` · ~$${job.costUsd.toFixed(4)}`}
+                  {(job.providerOnly || job.providerOrder) && (
+                    <span className="font-mono text-[11px] text-slate-400">
+                      {" "}
+                      · only:[{job.providerOnly ? JSON.parse(job.providerOnly).join(",") : "any"}]
+                      {" "}
+                      {job.providerOrder && `order:[${JSON.parse(job.providerOrder as string).join(",")}]`}
+                    </span>
+                  )}
                 </span>
                 {job.errorMessage && (
                   <span className="text-xs text-red-600">

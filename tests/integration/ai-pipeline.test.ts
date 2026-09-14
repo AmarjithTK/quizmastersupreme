@@ -26,6 +26,7 @@ import {
   runGenerationStep,
   stubProvider,
   type GenerationDeps,
+  type GenerationRequest,
   type RawStorage,
 } from "@/modules/ai";
 
@@ -433,3 +434,57 @@ describe("promptVersionStats — M13 acceptance reporting", () => {
   });
 });
 
+
+describe("provider routing forwarding (only/order)", () => {
+  it("passes the job's saved routing into the provider request", async () => {
+    const job = await createGenerationJob(
+      {
+        topic: TOPIC,
+        brief: "Write test questions.",
+        requestedCount: 1,
+        model: "stub/model",
+        providerOnly: ["together", "deepinfra"],
+        providerOrder: ["together"],
+      },
+      ACTOR,
+    );
+
+    let seenRequest: GenerationRequest | null = null;
+    await runGenerationStep(job.id, {
+      provider: stubProvider((request) => {
+        seenRequest = request;
+        return envelope(question("Routing forwarded?"));
+      }),
+      storage: memoryStorage(),
+    });
+
+    expect(seenRequest).not.toBeNull();
+    expect(seenRequest!.providerOnly).toEqual(["together", "deepinfra"]);
+    expect(seenRequest!.providerOrder).toEqual(["together"]);
+
+    await db().delete(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, job.id)).run();
+    await db().delete(schema.aiGenerationJobs).where(eq(schema.aiGenerationJobs.id, job.id)).run();
+  });
+
+  it("defaults to no routing when the job has none", async () => {
+    const job = await createGenerationJob(
+      { topic: TOPIC, brief: "Write test questions.", requestedCount: 1, model: "stub/model" },
+      ACTOR,
+    );
+
+    let seenRequest: GenerationRequest | null = null;
+    await runGenerationStep(job.id, {
+      provider: stubProvider((request) => {
+        seenRequest = request;
+        return envelope(question("No routing?"));
+      }),
+      storage: memoryStorage(),
+    });
+
+    expect(seenRequest!.providerOnly).toBeUndefined();
+    expect(seenRequest!.providerOrder).toBeUndefined();
+
+    await db().delete(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, job.id)).run();
+    await db().delete(schema.aiGenerationJobs).where(eq(schema.aiGenerationJobs.id, job.id)).run();
+  });
+});

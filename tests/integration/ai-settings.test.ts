@@ -16,6 +16,8 @@ import {
   DEFAULT_AI_MODEL,
   getAiGenerationSettings,
   updateAiGenerationSettings,
+  getProviderRouting,
+  updateProviderRouting,
   AI_PROVIDERS,
 } from "@/modules/settings";
 
@@ -28,13 +30,15 @@ beforeAll(async () => {
     persist: { path: ".tooling/test-state" },
   });
   setDbForTests(drizzle(proxy.env.DB, { schema }));
-  await db().delete(schema.appSettings).where(eq(schema.appSettings.key, "ai.model"));
-  await db().delete(schema.appSettings).where(eq(schema.appSettings.key, "ai.provider"));
+  for (const key of ["ai.model", "ai.provider", "ai.provider_only", "ai.provider_order"]) {
+    await db().delete(schema.appSettings).where(eq(schema.appSettings.key, key));
+  }
 });
 
 afterAll(async () => {
-  await db().delete(schema.appSettings).where(eq(schema.appSettings.key, "ai.model"));
-  await db().delete(schema.appSettings).where(eq(schema.appSettings.key, "ai.provider"));
+  for (const key of ["ai.model", "ai.provider", "ai.provider_only", "ai.provider_order"]) {
+    await db().delete(schema.appSettings).where(eq(schema.appSettings.key, key));
+  }
   await proxy?.dispose();
   proxy = null;
   setDbForTests(null);
@@ -66,5 +70,36 @@ describe("AI generation settings", () => {
     await expect(updateAiGenerationSettings({ model: "   " }, ACTOR)).rejects.toThrow(
       "cannot be empty",
     );
+  });
+});
+
+describe("provider routing settings (only/order)", () => {
+  it("round-trips only + order and rejects bad slugs", async () => {
+    const saved = await updateProviderRouting(
+      { only: ["together", "baidu", "deepinfra"], order: ["together", "deepinfra", "baidu"] },
+      ACTOR,
+    );
+    expect(saved.only).toEqual(["together", "baidu", "deepinfra"]);
+    expect(saved.order).toEqual(["together", "deepinfra", "baidu"]);
+
+    await expect(
+      updateProviderRouting({ only: ["not!/valid"] }, ACTOR),
+    ).rejects.toThrow("Invalid provider slug");
+
+    // A bad batch must not partially apply.
+    const after = await getProviderRouting();
+    expect(after.only).toEqual(["together", "baidu", "deepinfra"]);
+  });
+
+  it("deduplicates and lowercases slugs", async () => {
+    const saved = await updateProviderRouting({ only: ["Together", "together"] }, ACTOR);
+    expect(saved.only).toEqual(["together"]);
+  });
+
+  it("clears routing back to empty", async () => {
+    await updateProviderRouting({ only: [], order: [] }, ACTOR);
+    const after = await getProviderRouting();
+    expect(after.only).toEqual([]);
+    expect(after.order).toEqual([]);
   });
 });

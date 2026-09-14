@@ -86,7 +86,22 @@ export type CreateJobInput = {
   targetSetId?: string | null;
   temperature?: number | null;
   includeExamples?: boolean;
+  /** OpenRouter provider slugs — allow-list (only) and priority (order). */
+  providerOnly?: string[] | null;
+  providerOrder?: string[] | null;
 };
+
+/** Deterministic slug validation: non-empty, alphanumerics + dash/underscore. */
+function normalizeProviderSlugs(raw: string[] | null | undefined): string[] | null {
+  if (!raw || raw.length === 0) return null;
+  const slugs = [...new Set(raw.map((slug) => slug.trim()).filter(Boolean))];
+  for (const slug of slugs) {
+    if (!/^[a-z0-9][a-z0-9_-]*$/.test(slug)) {
+      throw validationError(`Invalid provider slug "${slug}". Use OpenRouter slugs like "together", "deepinfra".`);
+    }
+  }
+  return slugs.length > 0 ? slugs : null;
+}
 
 // ── job lifecycle ────────────────────────────────────────────────────────────
 
@@ -125,6 +140,12 @@ export async function createGenerationJob(
     difficulty: input.difficulty ?? null,
     requestedCount: input.requestedCount,
     avoidTopics: input.avoidTopics?.length ? JSON.stringify(input.avoidTopics) : null,
+    providerOnly: normalizeProviderSlugs(input.providerOnly)
+      ? JSON.stringify(normalizeProviderSlugs(input.providerOnly))
+      : null,
+    providerOrder: normalizeProviderSlugs(input.providerOrder)
+      ? JSON.stringify(normalizeProviderSlugs(input.providerOrder))
+      : null,
     provider: "openrouter",
     model: input.model.trim(),
     temperature: input.temperature ?? null,
@@ -261,6 +282,8 @@ async function generateStage(job: AiGenerationJob, deps: GenerationDeps): Promis
       user,
       temperature: job.temperature ?? 0.7,
       maxTokens: 8000,
+      providerOnly: job.providerOnly ? (JSON.parse(job.providerOnly) as string[]) : undefined,
+      providerOrder: job.providerOrder ? (JSON.parse(job.providerOrder) as string[]) : undefined,
     });
 
     const key = `ai-jobs/${job.id}/response.txt`;

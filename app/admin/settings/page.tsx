@@ -8,6 +8,7 @@ import {
   AI_PROVIDERS,
   DEFAULT_AI_MODEL,
   getAiGenerationSettings,
+  getProviderRouting,
 } from "@/modules/settings";
 
 export const dynamic = "force-dynamic";
@@ -21,7 +22,10 @@ export default async function AdminSettingsPage() {
   if (!user) redirect("/login");
   if (user.role !== "admin") return <ForbiddenCard />;
 
-  const settings = await getAiGenerationSettings();
+  const [settings, routing] = await Promise.all([
+    getAiGenerationSettings(),
+    getProviderRouting(),
+  ]);
 
   return (
     <div className="flex flex-col gap-6">
@@ -42,6 +46,7 @@ export default async function AdminSettingsPage() {
 
       <AiSettingsPanel
         initial={settings}
+        initialRouting={routing}
         providers={[...AI_PROVIDERS]}
         modelPresets={[...AI_MODEL_PRESETS]}
       />

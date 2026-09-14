@@ -16,6 +16,12 @@ export type GenerationRequest = {
   user: string;
   temperature?: number;
   maxTokens?: number;
+  /**
+   * OpenRouter provider routing (provider.only / provider.order).
+   * `only` is the allow-list of provider slugs; `order` is their priority.
+   */
+  providerOnly?: string[];
+  providerOrder?: string[];
 };
 
 export type GenerationResponse = {
@@ -86,7 +92,23 @@ export function openRouterProvider(options: {
         temperature: request.temperature ?? 0.7,
         maxTokens: request.maxTokens ?? 8000,
         promptChars: request.system.length + request.user.length,
+        providerOnly: request.providerOnly ?? [],
+        providerOrder: request.providerOrder ?? [],
       });
+
+      // provider.routing is added ONLY when the arrays are present — an empty
+      // object would override OpenRouter's default routing.
+      const providerRouting =
+        (request.providerOnly?.length ?? 0) > 0 || (request.providerOrder?.length ?? 0) > 0
+          ? {
+              ...(request.providerOnly && request.providerOnly.length > 0
+                ? { only: request.providerOnly }
+                : {}),
+              ...(request.providerOrder && request.providerOrder.length > 0
+                ? { order: request.providerOrder }
+                : {}),
+            }
+          : undefined;
 
       const response = await doFetch(OPENROUTER_URL, {
         method: "POST",
@@ -107,6 +129,7 @@ export function openRouterProvider(options: {
           // Ask for JSON where the model supports it; the parser copes when it
           // does not, so this is an optimisation rather than a requirement.
           response_format: { type: "json_object" },
+          ...(providerRouting ? { provider: providerRouting } : {}),
         }),
       });
 

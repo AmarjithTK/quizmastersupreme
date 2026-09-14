@@ -3,7 +3,7 @@ import { logInfo } from "@/lib/logger";
 import { bindings } from "@/lib/cloudflare/bindings";
 import { requireAdmin } from "@/modules/auth";
 import { createGenerationJob, listJobs, openRouterKeyConfigured } from "@/modules/ai";
-import { getAiGenerationSettings } from "@/modules/settings";
+import { getAiGenerationSettings, getProviderRouting } from "@/modules/settings";
 
 /**
  * /api/admin/generation-jobs
@@ -41,6 +41,11 @@ export async function POST(request: Request) {
         ? body.model.trim()
         : aiSettings.model;
 
+    // Provider routing (only/order) comes from settings; per-job overrides
+    // are not offered — routing is an account-wide cost lever, not a per-batch
+    // experiment.
+    const routing = await getProviderRouting();
+
     const job = await createGenerationJob(
       {
         topic: typeof body.topic === "string" ? body.topic : "",
@@ -54,6 +59,8 @@ export async function POST(request: Request) {
           ? body.avoidTopics.filter((s): s is string => typeof s === "string")
           : null,
         model,
+        providerOnly: routing.only.length > 0 ? routing.only : null,
+        providerOrder: routing.order.length > 0 ? routing.order : null,
         targetCategoryId: typeof body.targetCategoryId === "string" ? body.targetCategoryId : null,
         targetSetId: typeof body.targetSetId === "string" ? body.targetSetId : null,
       },

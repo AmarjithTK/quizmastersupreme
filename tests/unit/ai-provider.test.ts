@@ -140,3 +140,52 @@ describe("estimateCostUsd", () => {
     expect(small).toBeGreaterThan(0);
   });
 });
+
+describe("provider routing (provider.only / provider.order)", () => {
+  it("sends only + order exactly as given", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(okBody));
+    const provider = openRouterProvider({ apiKey: "k", fetchImpl });
+
+    await provider.generate({
+      model: "x",
+      system: "s",
+      user: "u",
+      providerOnly: ["together", "baidu", "deepinfra"],
+      providerOrder: ["together", "deepinfra", "baidu"],
+    });
+
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    expect(body.provider).toEqual({
+      only: ["together", "baidu", "deepinfra"],
+      order: ["together", "deepinfra", "baidu"],
+    });
+  });
+
+  it("omits the provider key entirely when routing is empty (default routing)", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(okBody));
+    const provider = openRouterProvider({ apiKey: "k", fetchImpl });
+
+    await provider.generate({ model: "x", system: "s", user: "u" });
+
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    expect(body.provider).toBeUndefined();
+  });
+
+  it("sends only one of the two when the other is empty", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(okBody));
+    const provider = openRouterProvider({ apiKey: "k", fetchImpl });
+
+    await provider.generate({
+      model: "x",
+      system: "s",
+      user: "u",
+      providerOnly: ["together"],
+    });
+
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    expect(body.provider).toEqual({ only: ["together"] });
+  });
+});

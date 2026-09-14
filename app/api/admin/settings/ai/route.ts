@@ -1,6 +1,14 @@
 import { errorResponse, jsonResponse } from "@/lib/errors";
 import { requireAdmin } from "@/modules/auth";
-import { getAiGenerationSettings, updateAiGenerationSettings, AI_PROVIDERS, AI_MODEL_PRESETS, DEFAULT_AI_MODEL } from "@/modules/settings";
+import {
+  getAiGenerationSettings,
+  updateAiGenerationSettings,
+  getProviderRouting,
+  updateProviderRouting,
+  AI_PROVIDERS,
+  AI_MODEL_PRESETS,
+  DEFAULT_AI_MODEL,
+} from "@/modules/settings";
 
 /**
  * /api/admin/settings/ai
@@ -14,7 +22,14 @@ import { getAiGenerationSettings, updateAiGenerationSettings, AI_PROVIDERS, AI_M
 export async function GET() {
   try {
     const settings = await getAiGenerationSettings();
-    return jsonResponse({ settings, providers: AI_PROVIDERS, modelPresets: AI_MODEL_PRESETS, defaultModel: DEFAULT_AI_MODEL });
+    const routing = await getProviderRouting();
+    return jsonResponse({
+      settings,
+      routing,
+      providers: AI_PROVIDERS,
+      modelPresets: AI_MODEL_PRESETS,
+      defaultModel: DEFAULT_AI_MODEL,
+    });
   } catch (error) {
     return errorResponse(error);
   }
@@ -33,7 +48,16 @@ export async function PUT(request: Request) {
       actor.id,
     );
 
-    return jsonResponse({ settings });
+    // Provider routing is optional and independent of model settings.
+    const routing = await updateProviderRouting(
+      {
+        only: Array.isArray(body.providerOnly) ? (body.providerOnly as string[]) : undefined,
+        order: Array.isArray(body.providerOrder) ? (body.providerOrder as string[]) : undefined,
+      },
+      actor.id,
+    );
+
+    return jsonResponse({ settings, routing });
   } catch (error) {
     return errorResponse(error);
   }

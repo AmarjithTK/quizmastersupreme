@@ -69,6 +69,8 @@ export default async function AdminGeneratePage() {
           costUsd: job.costUsd,
           errorCode: job.errorCode,
           errorMessage: job.errorMessage,
+          providerOnly: job.providerOnly,
+          providerOrder: job.providerOrder,
           createdAt: job.createdAt,
         }))}
         configured={openRouterKeyConfigured()}
