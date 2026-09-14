@@ -20,18 +20,27 @@ design constraints in §2 explain *why* the code is shaped the way it is.
 
 ## Current status
 
-**Milestones M0 complete and verified.** See `PLAN.md` §20 for the full roadmap.
+**v0.1 complete and verified locally** — milestones M0–M6. See `PLAN.md` §0.1 for the
+as-built status and §20 for the roadmap.
 
 Built so far:
 
-- ✅ Full 17-table schema with migrations, including FTS5 and all CHECK/partial-unique constraints
+- ✅ Full schema with migrations (18 tables), including FTS5 and every CHECK / partial-unique constraint
 - ✅ Local D1 workflow: generate → migrate → seed → query
 - ✅ Domain module layout (`src/modules/**`) with zero React inside it
-- ✅ Screen 1 (home, category card grid) and Screen 2 (category → set grid) rendering from D1
-- ✅ Normalization + SimHash (dedupe layers 1–2 foundations)
-- ✅ 37 tests guarding the frozen constraints
+- ✅ Google-only auth (OIDC + PKCE, not Firebase), D1 sessions, admin role gate
+- ✅ Admin: subjects, quiz sets, questions, set membership — all CRUD with validation and an audit trail
+- ✅ The question funnel: validate → normalize → dedupe layer 1 → insert (every write path uses it)
+- ✅ Screen 1 (subject grid + Continue banner) and Screen 2 (set grid with per-set progress)
+- ✅ Screen 3: the quiz runner with timer, question map, inline reveal and rich backstories
+- ✅ Resume that survives closing the browser; results, history and an account dashboard
+- ✅ 129 tests, including every §18.2 constraint test
 
-Not built yet: auth (M1), admin CRUD (M2–M4), quiz runner (M5), resume (M6).
+Not built yet: dedupe layers 2–3 (M11–M12), AI generation (M10), CSV import (M9).
+
+**Never run on a deployed Worker.** Everything above is verified against local D1 with
+`vinext dev`. The deploy half of the M0/M1 exit tests, and the live Google round-trip,
+still need real credentials — see "Deploying" below.
 
 ## Getting started
 
@@ -45,6 +54,13 @@ pnpm seed
 pnpm dev          # http://localhost:3000
 ```
 
+To exercise the admin screens without Google credentials, mint a local session:
+
+```bash
+pnpm dev:admin-token
+# prints a Cookie: header you can paste into curl, or set in a browser
+```
+
 ### All scripts
 
 | Script | Purpose |
@@ -55,6 +71,7 @@ pnpm dev          # http://localhost:3000
 | `pnpm deploy` | Deploy to Cloudflare Workers |
 | `pnpm typecheck` | `tsc --noEmit` |
 | `pnpm test` | Unit + integration tests (builds a clean test DB automatically) |
+| `pnpm dev:admin-token` | **Local only.** Mint an admin session for testing without Google |
 | `pnpm db:generate` | Generate a migration from the Drizzle schema |
 | `pnpm db:migrate:local` | Apply migrations to local D1 |
 | `pnpm db:migrate:remote` | Apply migrations to production D1 |
