@@ -22,6 +22,20 @@ export type GenerationRequest = {
    */
   providerOnly?: string[];
   providerOrder?: string[];
+  /**
+   * OpenRouter plugins, passed through verbatim. Used by the grounding stage
+   * for the `web` plugin (`{ id: "web", engine: "exa", max_results: 5 }`).
+   * Generation calls never set this: the search fee is per REQUEST, so grounding
+   * happens once per job into a shared source pool (PIPELINE-PLAN.md §8).
+   */
+  plugins?: Array<Record<string, unknown>>;
+};
+
+/** One grounded source, as OpenRouter standardises it into `url_citation`. */
+export type UrlCitation = {
+  url: string;
+  title?: string;
+  content?: string;
 };
 
 export type GenerationResponse = {
@@ -30,6 +44,8 @@ export type GenerationResponse = {
   model: string;
   promptTokens: number | null;
   completionTokens: number | null;
+  /** Web-search citations, when the request used the `web` plugin. */
+  citations?: UrlCitation[];
   /** The provider's own payload, for R2 archival and debugging. */
   raw: unknown;
 };
@@ -40,6 +56,7 @@ export interface LlmProvider {
 }
 
 import { logError, logInfo, logWarn, logException, maskSecret } from "@/lib/logger";
+import { estimateCostUsd } from "@/lib/pricing";
 
 export class LlmError extends Error {
   readonly code: string;
@@ -65,26 +82,10 @@ const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
  */
 export const DEFAULT_MAX_TOKENS = 16_000;
 
-/** Rough per-million-token prices, used only to record an estimated cost. */
-const PRICE_PER_MILLION: Record<string, { input: number; output: number }> = {
-  // DeepSeek V4.1 Flash / V4 Flash (OpenRouter list price, Sep 2026).
-  "deepseek/deepseek-v4.1-flash": { input: 0.15, output: 0.6 },
-  "deepseek/deepseek-v4-flash-0731": { input: 0.15, output: 0.6 },
-  // Unknown model: deliberately high so cost is never silently under-reported.
-  default: { input: 3, output: 15 },
-};
-
-export function estimateCostUsd(
-  model: string,
-  promptTokens: number | null,
-  completionTokens: number | null,
-): number | null {
-  if (promptTokens == null && completionTokens == null) return null;
-  const price = PRICE_PER_MILLION[model] ?? PRICE_PER_MILLION.default!;
-  const input = ((promptTokens ?? 0) / 1_000_000) * price.input;
-  const output = ((completionTokens ?? 0) / 1_000_000) * price.output;
-  return Math.round((input + output) * 1_000_000) / 1_000_000;
-}
+// Pricing lives in `@/lib/pricing` so the CLIENT generate screen can show a
+// cost hint without importing this server module. Re-exported here because the
+// pipeline has always imported it from the provider.
+export { estimateCostUsd, estimateJobCostUsd, priceFor } from "@/lib/pricing";
 
 export function openRouterProvider(options: {
   apiKey: string;
@@ -141,6 +142,7 @@ export function openRouterProvider(options: {
           // does not, so this is an optimisation rather than a requirement.
           response_format: { type: "json_object" },
           ...(providerRouting ? { provider: providerRouting } : {}),
+          ...(request.plugins && request.plugins.length > 0 ? { plugins: request.plugins } : {}),
         }),
       });
 
@@ -178,7 +180,15 @@ export function openRouterProvider(options: {
 
       const payload = parsed as {
         model?: string;
-        choices?: Array<{ message?: { content?: string } }>;
+        choices?: Array<{
+          message?: {
+            content?: string;
+            annotations?: Array<{
+              type?: string;
+              url_citation?: { url?: string; title?: string; content?: string };
+            }>;
+          };
+        }>;
         usage?: { prompt_tokens?: number; completion_tokens?: number };
       };
 
@@ -191,11 +201,27 @@ export function openRouterProvider(options: {
         throw new LlmError("The model returned an empty response.", { code: "EMPTY_RESPONSE" });
       }
 
+      // `url_citation` annotations are how OpenRouter surfaces the pages the
+      // web plugin actually used, for every engine and model family.
+      const citations: UrlCitation[] = [];
+      for (const annotation of payload.choices?.[0]?.message?.annotations ?? []) {
+        const citation = annotation.url_citation;
+        if (annotation.type === "url_citation" && citation?.url) {
+          citations.push({
+            url: citation.url,
+            title: citation.title,
+            content: citation.content,
+          });
+        }
+      }
+
       logInfo("provider", "response ok", {
         model: payload.model ?? request.model,
         promptTokens: payload.usage?.prompt_tokens ?? null,
         completionTokens: payload.usage?.completion_tokens ?? null,
         contentChars: text.length,
+        grounded: request.plugins?.length ? true : undefined,
+        citations: citations.length || undefined,
       });
 
       return {
@@ -203,6 +229,7 @@ export function openRouterProvider(options: {
         model: payload.model ?? request.model,
         promptTokens: payload.usage?.prompt_tokens ?? null,
         completionTokens: payload.usage?.completion_tokens ?? null,
+        citations,
         raw: parsed,
       };
     },

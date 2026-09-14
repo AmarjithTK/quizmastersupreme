@@ -72,6 +72,8 @@ export default async function AdminGeneratePage() {
           batchSize: job.batchSize,
           maxCalls: job.maxCalls,
           backfillRound: job.backfillRound,
+          groundingCostUsd: job.groundingCostUsd,
+          groundingCached: job.groundingCached,
           costUsd: job.costUsd,
           errorCode: job.errorCode,
           errorMessage: job.errorMessage,
@@ -83,6 +85,7 @@ export default async function AdminGeneratePage() {
         defaultModel={aiSettings.model}
         defaultBatchSize={generation.batchSize}
         maxRequested={generation.maxRequested}
+        defaultGroundingMode={generation.groundingMode}
         categories={categories.map((c) => ({ id: c.id, title: c.title }))}
       />
     </div>

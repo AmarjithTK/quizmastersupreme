@@ -11,6 +11,8 @@ import {
   AI_MODEL_PRESETS,
   DEFAULT_AI_MODEL,
   GENERATION_LIMITS,
+  GROUNDING_ENGINES,
+  GROUNDING_MODES,
   type CountMode,
   type GenerationSettings,
 } from "@/modules/settings";
@@ -38,6 +40,8 @@ export async function GET() {
       routing,
       generation,
       generationLimits: GENERATION_LIMITS,
+      groundingModes: GROUNDING_MODES,
+      groundingEngines: GROUNDING_ENGINES,
       providers: AI_PROVIDERS,
       modelPresets: AI_MODEL_PRESETS,
       defaultModel: DEFAULT_AI_MODEL,
@@ -95,6 +99,30 @@ export async function PUT(request: Request) {
             countMode:
               typeof generationBody.countMode === "string"
                 ? (generationBody.countMode as CountMode)
+                : undefined,
+            groundingMode:
+              typeof generationBody.groundingMode === "string"
+                ? (generationBody.groundingMode as GenerationSettings["groundingMode"])
+                : undefined,
+            groundingEngine:
+              typeof generationBody.groundingEngine === "string"
+                ? (generationBody.groundingEngine as GenerationSettings["groundingEngine"])
+                : undefined,
+            groundingMaxResults:
+              typeof generationBody.groundingMaxResults === "number"
+                ? generationBody.groundingMaxResults
+                : undefined,
+            groundingTtlDays:
+              typeof generationBody.groundingTtlDays === "number"
+                ? generationBody.groundingTtlDays
+                : undefined,
+            groundingIncludeDomains:
+              typeof generationBody.groundingIncludeDomains === "string"
+                ? generationBody.groundingIncludeDomains
+                : undefined,
+            groundingExcludeDomains:
+              typeof generationBody.groundingExcludeDomains === "string"
+                ? generationBody.groundingExcludeDomains
                 : undefined,
           },
           actor.id,

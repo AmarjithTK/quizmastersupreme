@@ -5,11 +5,15 @@ import { commitJobToSet } from "@/modules/ai";
 /**
  * POST /api/admin/generation-jobs/:id/commit
  *
- * The batch flow's single commit action: promote every non-rejected candidate
- * of the job into the question bank, then add the WHOLE approved set to a
- * Q Set — an existing one ({ targetSetId }) or a brand-new one ({ newSet }).
+ * The batch flow's single commit action: promote the accepted candidates into
+ * the question bank, then attach them to a Q Set — an existing one
+ * ({ targetSetId }) or a brand-new one ({ newSet }).
  *
  * Exactly one of targetSetId / newSet must be given.
+ *
+ * `candidateIds` is the reviewer's explicit selection: when present only those
+ * questions are added and the target-count auto-trim is skipped. Without it,
+ * every accepted candidate is added, trimmed to the job's requested count.
  */
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -36,6 +40,9 @@ export async function POST(request: Request, context: RouteContext) {
             description:
               typeof newSetBody.description === "string" ? newSetBody.description : null,
           }
+        : null,
+      candidateIds: Array.isArray(body.candidateIds)
+        ? body.candidateIds.filter((value): value is string => typeof value === "string")
         : null,
     });
 

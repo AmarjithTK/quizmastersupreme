@@ -34,7 +34,7 @@ the existing question they matched** — so the reviewer can inspect and overrid
 **M0–M14 implemented, then simplified by the revamp — all verified locally.**
 See `PLAN.md` §0.1 for the as-built status and §20 for the roadmap. Highlights:
 
-- ✅ Full schema with migrations (17 tables), FTS5, CHECK / partial-unique constraints
+- ✅ Full schema with migrations (18 tables), FTS5, CHECK / partial-unique constraints
 - ✅ Google-only auth (OIDC + PKCE), D1 sessions, admin role gate
 - ✅ Admin: categories, quiz sets, questions, set membership — CRUD with validation + audit trail
 - ✅ The question funnel: validate → normalize → dedupe (layers 1–2) → insert on every write path
@@ -43,7 +43,10 @@ See `PLAN.md` §0.1 for the as-built status and §20 for the roadmap. Highlights
 - ✅ AI generation: a target count runs as small batches (25/call, editable) that are each
   filtered against the whole bank and refilled until the target is met; duplicates are shown,
   rejected by default and overridable; coverage-aware prompts; one-click add-to-set; the
-  batch review opens itself when a run finishes
+  batch review opens itself when a run finishes; per-batch regenerate and selection-based commit
+- ✅ Optional web grounding (OpenRouter `web` plugin, off by default): ONE cached research
+  call per job builds a shared fact sheet every batch reuses — search is billed per request,
+  so it is never enabled on the generation calls themselves
 - ✅ M14 hardening: rate limits, error boundaries, backup/restore (rehearsed by test), staging config,
   keyboard accessibility (skip link, focus management, live regions)
 

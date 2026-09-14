@@ -21,6 +21,12 @@ type Generation = {
   minRefill: number;
   maxCalls: number;
   countMode: "at_least_trim" | "exact";
+  groundingMode: "off" | "single" | "agentic";
+  groundingEngine: "exa" | "parallel" | "perplexity";
+  groundingMaxResults: number;
+  groundingTtlDays: number;
+  groundingIncludeDomains: string;
+  groundingExcludeDomains: string;
 };
 type Limits = Record<"batchSize" | "maxRequested" | "minRefill" | "maxCalls", { min: number; max: number }>;
 type Props = {
@@ -60,6 +66,20 @@ export function AiSettingsPanel({
   const [minRefill, setMinRefill] = useState(String(initialGeneration.minRefill));
   const [maxCalls, setMaxCalls] = useState(String(initialGeneration.maxCalls));
   const [countMode, setCountMode] = useState(initialGeneration.countMode);
+  const [groundingMode, setGroundingMode] = useState(initialGeneration.groundingMode);
+  const [groundingEngine, setGroundingEngine] = useState(initialGeneration.groundingEngine);
+  const [groundingMaxResults, setGroundingMaxResults] = useState(
+    String(initialGeneration.groundingMaxResults),
+  );
+  const [groundingTtlDays, setGroundingTtlDays] = useState(
+    String(initialGeneration.groundingTtlDays),
+  );
+  const [groundingIncludeDomains, setGroundingIncludeDomains] = useState(
+    initialGeneration.groundingIncludeDomains,
+  );
+  const [groundingExcludeDomains, setGroundingExcludeDomains] = useState(
+    initialGeneration.groundingExcludeDomains,
+  );
   const [mode, setMode] = useState<RoutingMode>(modeOf(initialRouting));
   const [slugs, setSlugs] = useState(
     initialRouting.only.length > 0
@@ -83,6 +103,12 @@ export function AiSettingsPanel({
     setMinRefill(String(initialGeneration.minRefill));
     setMaxCalls(String(initialGeneration.maxCalls));
     setCountMode(initialGeneration.countMode);
+    setGroundingMode(initialGeneration.groundingMode);
+    setGroundingEngine(initialGeneration.groundingEngine);
+    setGroundingMaxResults(String(initialGeneration.groundingMaxResults));
+    setGroundingTtlDays(String(initialGeneration.groundingTtlDays));
+    setGroundingIncludeDomains(initialGeneration.groundingIncludeDomains);
+    setGroundingExcludeDomains(initialGeneration.groundingExcludeDomains);
   }, [initial, initialRouting, initialGeneration]);
 
   async function save() {
@@ -103,6 +129,12 @@ export function AiSettingsPanel({
             minRefill: Number(minRefill),
             maxCalls: Number(maxCalls),
             countMode,
+            groundingMode,
+            groundingEngine,
+            groundingMaxResults: Number(groundingMaxResults),
+            groundingTtlDays: Number(groundingTtlDays),
+            groundingIncludeDomains,
+            groundingExcludeDomains,
           },
         }),
       });
@@ -298,6 +330,88 @@ export function AiSettingsPanel({
           ))}
         </div>
       </fieldset>
+
+      <hr className="mt-6 border-slate-200" />
+
+      <h3 className="mt-5 text-sm font-semibold text-slate-800">Web grounding</h3>
+      <p className="mt-1 text-xs text-slate-500">
+        One OpenRouter search per job builds a shared fact sheet that every batch reuses. Search
+        is billed <strong>per request</strong> (~$0.007 on Exa), so this runs once and is cached —
+        it is never enabled on the per-batch generation calls.
+      </p>
+
+      <div className="mt-4 grid grid-cols-2 gap-3">
+        <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
+          Mode
+          <select
+            value={groundingMode}
+            onChange={(e) => setGroundingMode(e.target.value as Generation["groundingMode"])}
+            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-900/10"
+          >
+            <option value="off">off — no search, no cost</option>
+            <option value="single">single — one research call per job</option>
+            <option value="agentic">agentic — model decides (multi-search, pricier)</option>
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
+          Engine
+          <select
+            value={groundingEngine}
+            onChange={(e) => setGroundingEngine(e.target.value as Generation["groundingEngine"])}
+            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-900/10"
+          >
+            <option value="exa">exa — $0.007/request (best quality)</option>
+            <option value="parallel">parallel — $0.005/request</option>
+            <option value="perplexity">perplexity — $0.005/request</option>
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
+          Results per search (1–10)
+          <input
+            type="number"
+            min={1}
+            max={10}
+            value={groundingMaxResults}
+            onChange={(e) => setGroundingMaxResults(e.target.value)}
+            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-900/10"
+          />
+          <span className="text-[10px] font-normal text-slate-400">
+            each result is ~2–4k characters of billed input
+          </span>
+        </label>
+        <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
+          Cache TTL (days, 0–90)
+          <input
+            type="number"
+            min={0}
+            max={90}
+            value={groundingTtlDays}
+            onChange={(e) => setGroundingTtlDays(e.target.value)}
+            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-900/10"
+          />
+          <span className="text-[10px] font-normal text-slate-400">
+            repeat topics then cost $0 in search
+          </span>
+        </label>
+        <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
+          Include domains (comma-separated, optional)
+          <input
+            value={groundingIncludeDomains}
+            onChange={(e) => setGroundingIncludeDomains(e.target.value)}
+            placeholder="example.com, *.gov.in"
+            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-900/10"
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
+          Exclude domains (comma-separated, optional)
+          <input
+            value={groundingExcludeDomains}
+            onChange={(e) => setGroundingExcludeDomains(e.target.value)}
+            placeholder="reddit.com"
+            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-900/10"
+          />
+        </label>
+      </div>
 
       <div className="mt-5 flex items-center gap-3">
         <button

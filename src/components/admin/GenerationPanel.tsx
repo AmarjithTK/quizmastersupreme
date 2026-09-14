@@ -16,6 +16,7 @@ import { AlertCircle, Flag, Loader2, Play, Sparkles } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { BatchReview } from "@/components/admin/BatchReview";
+import { estimateJobCostUsd } from "@/lib/pricing";
 import { LocalTime } from "@/components/ui/LocalTime";
 
 type Job = {
@@ -31,6 +32,8 @@ type Job = {
   batchSize: number;
   maxCalls: number;
   backfillRound: number;
+  groundingCostUsd: number | null;
+  groundingCached: number;
   costUsd: number | null;
   errorCode: string | null;
   errorMessage: string | null;
@@ -54,6 +57,9 @@ type Progress = {
   /** Planned calls at the current batch size. */
   totalPlannedCalls: number;
   batchSize: number;
+  /** One-off web grounding: what it cost, and whether it came from cache. */
+  groundingCostUsd: number | null;
+  groundingCached: boolean;
   done: boolean;
   error: string | null;
 };
@@ -76,6 +82,7 @@ export function GenerationPanel({
   defaultModel,
   defaultBatchSize = 25,
   maxRequested = 300,
+  defaultGroundingMode = "off",
   categories,
   sets,
 }: {
@@ -86,6 +93,8 @@ export function GenerationPanel({
   defaultBatchSize?: number;
   /** Global `generation.max_requested` ceiling. */
   maxRequested?: number;
+  /** Global `generation.grounding_mode`; overridable per job. */
+  defaultGroundingMode?: "off" | "single" | "agentic";
   categories: Array<{ id: string; title: string }>;
   sets: Array<{ id: string; title: string; status: string; categoryTitle?: string }>;
 }) {
@@ -96,6 +105,7 @@ export function GenerationPanel({
   const [sources, setSources] = useState("");
   const [count, setCount] = useState("25");
   const [batchSize, setBatchSize] = useState(String(defaultBatchSize));
+  const [groundingMode, setGroundingMode] = useState(defaultGroundingMode);
   const [difficulty, setDifficulty] = useState("medium");
   const [model, setModel] = useState(defaultModel);
   const [categoryId, setCategoryId] = useState("");
@@ -151,6 +161,7 @@ export function GenerationPanel({
           sources: sources.trim() || null,
           requestedCount: Number(count) || 25,
           batchSize: Number(batchSize) || defaultBatchSize,
+          groundingMode,
           difficulty,
           model,
           targetCategoryId: categoryId || null,
@@ -291,6 +302,10 @@ export function GenerationPanel({
               onChange={(e) => setCount(e.target.value)}
               className={field}
             />
+            <span className="text-[10px] font-normal text-slate-400">
+              ≈ ${estimateJobCostUsd(Number(count) || 25, Number(batchSize) || 25, model).toFixed(4)}{" "}
+              · {Math.max(1, Math.ceil((Number(count) || 25) / (Number(batchSize) || 25)))} batches
+            </span>
             <span className="flex flex-wrap gap-1 pt-0.5">
               {[25, 50, 100, 200, 300]
                 .filter((n) => n <= maxRequested)
@@ -326,6 +341,23 @@ export function GenerationPanel({
             </span>
           </label>
           <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
+            Web grounding
+            <select
+              value={groundingMode}
+              onChange={(e) =>
+                setGroundingMode(e.target.value as "off" | "single" | "agentic")
+              }
+              className={field}
+            >
+              <option value="off">off — no search</option>
+              <option value="single">one search per job</option>
+              <option value="agentic">agentic — multi-search</option>
+            </select>
+            <span className="text-[10px] font-normal text-slate-400">
+              one research call, cached for later jobs
+            </span>
+          </label>
+          <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
             Difficulty
             <select value={difficulty} onChange={(e) => setDifficulty(e.target.value)} className={field}>
               {["easy", "medium", "hard", "expert"].map((d) => (
@@ -354,6 +386,7 @@ export function GenerationPanel({
           <span className="text-xs text-slate-500">
             Small batches, filtered after every one and refilled until the target is met.
             Duplicates are shown as rejected by default — never hidden. Max {maxRequested} per job.
+            Web grounding (if on) runs once per job and is reused by every batch.
           </span>
         </div>
 
@@ -373,6 +406,13 @@ export function GenerationPanel({
         >
           {progress.done ? (
             <>
+              {progress.groundingCostUsd != null && progress.groundingCostUsd > 0 && (
+                <>
+                  Grounded
+                  {progress.groundingCached ? " (cached)" : ""} for ~$
+                  {progress.groundingCostUsd.toFixed(4)} ·{" "}
+                </>
+              )}
               Target <strong>{progress.requestedCount}</strong> — <strong>{progress.acceptedCount}</strong>{" "}
               accepted in <strong>{progress.round}</strong> call{progress.round === 1 ? "" : "s"} of{" "}
               {progress.batchSize}/batch. <strong>{progress.producedCount}</strong> generated in total,{" "}
@@ -435,6 +475,9 @@ export function GenerationPanel({
                   {job.producedCount} · flagged {job.duplicateCount} · {job.backfillRound} call
                   {job.backfillRound === 1 ? "" : "s"} of {job.batchSize}/batch
                   {job.costUsd != null && ` · ~$${job.costUsd.toFixed(4)}`}
+                  {job.groundingCached === 1 && " · grounded (cached)"}
+                  {job.groundingCostUsd != null && job.groundingCostUsd > 0 &&
+                    ` · grounding ~$${job.groundingCostUsd.toFixed(4)}`}
                   {(job.providerOnly || job.providerOrder) && (
                     <span className="font-mono text-[11px] text-slate-400">
                       {" "}

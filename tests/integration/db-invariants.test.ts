@@ -103,7 +103,7 @@ describe("§2.1 two-level content model", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("schema inventory", () => {
-  it("creates all 17 application tables", async () => {
+  it("creates all 18 application tables", async () => {
     const rows = await allRows<{ name: string }>(
       db,
       `SELECT name FROM sqlite_master
@@ -115,7 +115,7 @@ describe("schema inventory", () => {
        ORDER BY name`,
     );
     const names = rows.map((r) => r.name);
-    expect(names).toHaveLength(17);
+    expect(names).toHaveLength(18);
     expect(names).toEqual(
       expect.arrayContaining([
         "users",
@@ -133,6 +133,7 @@ describe("schema inventory", () => {
         "ai_generation_jobs",
         "ai_generation_batches",
         "ai_candidates",
+        "grounding_cache",
         "audit_log",
         "app_settings",
       ]),

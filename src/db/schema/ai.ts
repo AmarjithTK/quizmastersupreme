@@ -84,10 +84,15 @@ export const aiGenerationJobs = sqliteTable(
     maxCalls: integer("max_calls").notNull().default(20),
     /** JSON: compact concept keys accepted so far, fed to later batches. */
     coveredConcepts: text("covered_concepts"),
-    /** JSON (P2): grounded extracts + citations + user sources. */
+    /** JSON (P2): the grounded source pool shared by every batch. */
     sourcePool: text("source_pool"),
+    /** Per-job override of the global grounding mode (null = use the setting). */
+    groundingMode: text("grounding_mode"),
     groundingCostUsd: real("grounding_cost_usd"),
     groundingCached: integer("grounding_cached").notNull().default(0),
+    groundingAt: integer("grounding_at"),
+    /** Why grounding produced nothing — reported, never fatal (P2). */
+    groundingError: text("grounding_error"),
 
     promptTokens: integer("prompt_tokens"),
     completionTokens: integer("completion_tokens"),
@@ -208,6 +213,29 @@ export const aiCandidates = sqliteTable(
   ],
 );
 
+/**
+ * Grounding cache (PIPELINE-PLAN.md §8): a normalised topic + engine maps to the
+ * source pool that was already paid for, so a repeat topic skips the search.
+ */
+export const groundingCache = sqliteTable(
+  "grounding_cache",
+  {
+    /** sha256(topic | engine | maxResults | domains). */
+    key: text("key").primaryKey(),
+    topic: text("topic").notNull(),
+    engine: text("engine").notNull(),
+    /** JSON SourcePool. */
+    payload: text("payload").notNull(),
+    /** JSON string[]: the queries the research call actually ran. */
+    queries: text("queries"),
+    costUsd: real("cost_usd"),
+    fetchedAt: integer("fetched_at").notNull(),
+    expiresAt: integer("expires_at").notNull(),
+  },
+  (t) => [index("ix_grounding_expiry").on(t.expiresAt)],
+);
+
+export type GroundingCacheRow = typeof groundingCache.$inferSelect;
 export type AiGenerationJob = typeof aiGenerationJobs.$inferSelect;
 export type NewAiGenerationJob = typeof aiGenerationJobs.$inferInsert;
 export type AiGenerationBatch = typeof aiGenerationBatches.$inferSelect;

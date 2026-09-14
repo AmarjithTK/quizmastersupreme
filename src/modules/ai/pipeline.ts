@@ -54,6 +54,13 @@ import { buildSystemPrompt, buildUserPrompt, PROMPT_VERSION } from "./prompts/ge
 import { estimateCostUsd, LlmError, type LlmProvider } from "./provider";
 import { outputBudgetFor } from "./budget";
 import { buildCoverageDigest, extractConceptKey, estimateTokens } from "./coverage";
+import {
+  buildSourcePool,
+  renderSourcePool,
+  type GroundingMode,
+  type GroundingSettings,
+  type SourcePool,
+} from "@/modules/grounding";
 
 const MAX_BOUND_PARAMS = 90;
 /**
@@ -74,6 +81,13 @@ export type RawStorage = {
 export type GenerationDeps = {
   provider: LlmProvider;
   storage: RawStorage;
+  /**
+   * Provider for the grounding research call. Defaults to `provider`; injected
+   * so tests can ground with a stub and no network.
+   */
+  groundingProvider?: LlmProvider;
+  /** Cost estimator, injectable for tests. */
+  estimateCostUsd?: typeof estimateCostUsd;
 };
 
 export type JobProgress = {
@@ -94,6 +108,9 @@ export type JobProgress = {
   totalPlannedCalls: number;
   /** Questions per internal call for this job. */
   batchSize: number;
+  /** What the one-off web grounding cost, if it ran. */
+  groundingCostUsd: number | null;
+  groundingCached: boolean;
   /** True once the job can advance no further without an admin action. */
   done: boolean;
   error: string | null;
@@ -107,6 +124,8 @@ export type CreateJobInput = {
   batchSize?: number | null;
   /** Per-job override of the call cap. */
   maxCalls?: number | null;
+  /** Per-job override of the global grounding mode. */
+  groundingMode?: GroundingMode | null;
   difficulty?: string | null;
   subtopics?: string[] | null;
   avoidTopics?: string[] | null;
@@ -226,9 +245,14 @@ export async function createGenerationJob(
     batchSize,
     maxCalls,
     coveredConcepts: null,
-    sourcePool: input.sources?.trim() ? JSON.stringify({ userSources: input.sources.trim() }) : null,
+    // The source pool is filled by the first step (grounding is a slow call, so
+    // it must not run inside the create request).
+    sourcePool: null,
+    groundingMode: input.groundingMode ?? null,
     groundingCostUsd: null,
     groundingCached: 0,
+    groundingAt: null,
+    groundingError: null,
     promptTokens: null,
     completionTokens: null,
     costUsd: null,
@@ -305,6 +329,8 @@ function progressOf(job: AiGenerationJob, error: string | null = null): JobProgr
     round: job.backfillRound,
     totalPlannedCalls: Math.max(1, Math.ceil(job.requestedCount / Math.max(1, job.batchSize))),
     batchSize: job.batchSize,
+    groundingCostUsd: job.groundingCostUsd,
+    groundingCached: job.groundingCached === 1,
     done: TERMINAL_STATUSES.includes(job.status),
     error,
   };
@@ -367,7 +393,67 @@ async function generateRound(job: AiGenerationJob, deps: GenerationDeps): Promis
       ? Math.max(1, Math.min(job.batchSize, shortfall))
       : Math.min(job.batchSize, Math.max(shortfall, settings.minRefill));
 
-  const digest = buildJobDigest(job);
+  // ── grounding: ONE research call per job, before the first batch ─────────
+  // Billed per request, so it must not run per batch. Failures are recorded,
+  // never fatal — the job runs ungrounded.
+  let groundingCost = job.groundingCostUsd ?? 0;
+  let sourcePoolJson = job.sourcePool;
+  if (batchNo === 1 && !sourcePoolJson) {
+    const mode = (job.groundingMode as GroundingMode | null) ?? settings.groundingMode;
+    if (mode !== "off") {
+      const groundingSettings: GroundingSettings = {
+        mode,
+        engine: settings.groundingEngine,
+        maxResults: settings.groundingMaxResults,
+        ttlDays: settings.groundingTtlDays,
+        includeDomains: splitDomains(settings.groundingIncludeDomains),
+        excludeDomains: splitDomains(settings.groundingExcludeDomains),
+      };
+
+      const grounded = await buildSourcePool(
+        {
+          topic: job.topic,
+          brief: job.brief,
+          userSources: job.sources,
+          settings: groundingSettings,
+        },
+        {
+          provider: deps.groundingProvider ?? deps.provider,
+          model: job.model,
+          estimateCostUsd: deps.estimateCostUsd ?? estimateCostUsd,
+        },
+      );
+
+      // `groundingCost` (0 on failure) feeds the job total; the stored column
+      // stays null when nothing was actually billed.
+      groundingCost = grounded.costUsd ?? 0;
+      sourcePoolJson = grounded.pool ? JSON.stringify(grounded.pool) : null;
+
+      await db()
+        .update(aiGenerationJobs)
+        .set({
+          sourcePool: sourcePoolJson,
+          groundingCostUsd: grounded.costUsd,
+          groundingCached: grounded.cached ? 1 : 0,
+          groundingAt: nowMs(),
+          groundingError: grounded.error,
+        })
+        .where(eq(aiGenerationJobs.id, job.id));
+
+      logInfo("ai", `grounding for ${job.id}`, {
+        mode,
+        engine: groundingSettings.engine,
+        cached: grounded.cached,
+        skipped: grounded.skipped,
+        facts: grounded.pool?.extracts.length ?? 0,
+        citations: grounded.pool?.citations.length ?? 0,
+        costUsd: grounded.costUsd,
+        error: grounded.error,
+      });
+    }
+  }
+
+  const digest = buildJobDigest(job, sourcePoolJson);
   const system = buildSystemPrompt();
   const user = buildUserPrompt({
     topic: job.topic,
@@ -615,7 +701,12 @@ async function generateRound(job: AiGenerationJob, deps: GenerationDeps): Promis
       rawResponseKey: key,
       promptTokens,
       completionTokens,
-      costUsd: estimateCostUsd(job.model, promptTokens, completionTokens),
+      // Generation tokens for the whole job so far, plus the one-off search cost.
+      costUsd:
+        Math.round(
+          ((estimateCostUsd(job.model, promptTokens, completionTokens) ?? 0) + groundingCost) *
+            1_000_000,
+        ) / 1_000_000,
       finishedAt: status === "running" ? null : nowFinished,
       durationMs: job.startedAt ? nowFinished - job.startedAt : nowFinished - startedAt,
       errorCode,
@@ -675,30 +766,62 @@ async function callWithRetry(
  * The job's prompt context: what the BANK covers (built once at creation) plus
  * what THIS JOB has already generated, so later batches cannot repeat them.
  */
-function buildJobDigest(job: AiGenerationJob): string {
-  const bank = job.coverageDigest ?? "";
-  const concepts = parseJsonArray(job.coveredConcepts) ?? [];
-  if (concepts.length === 0) return bank;
+function buildJobDigest(
+  job: AiGenerationJob,
+  sourcePoolJson: string | null = job.sourcePool,
+): string {
+  const parts: string[] = [];
 
-  const lines: string[] = [];
-  let used = 0;
-  for (const concept of concepts) {
-    const line = `- ${concept}`;
-    const cost = estimateTokens(`${line}\n`);
-    if (used + cost > JOB_CONCEPTS_MAX_TOKENS) {
-      lines.push(`- …and ${concepts.length - lines.length} more already-generated concepts`);
-      break;
+  // 1. The shared grounding pool (built once, reused by every batch as text).
+  const pool = parseSourcePool(sourcePoolJson);
+  if (pool) parts.push(renderSourcePool(pool));
+
+  // 2. What the BANK already covers for this topic.
+  if (job.coverageDigest) parts.push(job.coverageDigest);
+
+  // 3. What THIS JOB has already generated.
+  const concepts = parseJsonArray(job.coveredConcepts) ?? [];
+  if (concepts.length > 0) {
+    const lines: string[] = [];
+    let used = 0;
+    for (const concept of concepts) {
+      const line = `- ${concept}`;
+      const cost = estimateTokens(`${line}\n`);
+      if (used + cost > JOB_CONCEPTS_MAX_TOKENS) {
+        lines.push(`- …and ${concepts.length - lines.length} more already-generated concepts`);
+        break;
+      }
+      lines.push(line);
+      used += cost;
     }
-    lines.push(line);
-    used += cost;
+    parts.push(
+      "",
+      `ALREADY GENERATED IN THIS JOB (do NOT repeat these; ${concepts.length} so far):`,
+      ...lines,
+    );
   }
 
-  return [
-    bank,
-    "",
-    `ALREADY GENERATED IN THIS JOB (do NOT repeat these; ${concepts.length} so far):`,
-    ...lines,
-  ].join("\n");
+  return parts.join("\n");
+}
+
+/** Tolerant reader for a stored source pool. */
+function parseSourcePool(raw: string | null): SourcePool | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as SourcePool;
+    if (!parsed || !Array.isArray(parsed.extracts)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+/** Comma-separated domain lists from settings. */
+function splitDomains(raw: string): string[] {
+  return raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
 }
 
 /** Trim the job-local concept list to its token budget, keeping the newest. */
@@ -849,6 +972,28 @@ export async function listJobCandidates(jobId: string): Promise<CandidateWithJob
     .sort((a, b) => (a.batchIndex ?? 0) - (b.batchIndex ?? 0));
 }
 
+/**
+ * Rebuild the job-local concept list from the questions that are still live.
+ * Used after a per-batch regenerate supersedes rows, so the replacement batch
+ * does not treat the discarded questions as already covered.
+ */
+function conceptsFromCandidates(candidates: AiCandidate[]): string[] {
+  const concepts: string[] = [];
+  for (const candidate of candidates) {
+    if (candidate.rejected !== 0) continue;
+    let answer: string | null = null;
+    try {
+      const options = JSON.parse(candidate.optionsJson) as Array<{ key?: string; body?: string }>;
+      answer = options.find((option) => option.key === candidate.correctOptionKey)?.body ?? null;
+    } catch {
+      answer = null;
+    }
+    const concept = extractConceptKey(candidate.stem, answer);
+    if (concept) concepts.push(concept);
+  }
+  return capConcepts(concepts);
+}
+
 /** Every internal call of a job, oldest first — the progress panel's payload. */
 export async function listJobBatches(jobId: string): Promise<AiGenerationBatch[]> {
   return db()
@@ -913,6 +1058,12 @@ export async function commitJobToSet(
       difficulty?: string;
       description?: string | null;
     } | null;
+    /**
+     * Explicit reviewer selection. When present it wins outright: only these
+     * candidates are added, in batch order, and the target-count trim is skipped
+     * (the human already chose). Unknown/rejected ids are ignored.
+     */
+    candidateIds?: string[] | null;
   },
 ): Promise<CommitOutcome> {
   const job = await getJob(jobId);
@@ -948,14 +1099,26 @@ export async function commitJobToSet(
   }
 
   const kept = (await listJobCandidates(jobId)).filter((candidate) => candidate.rejected === 0);
-  /**
-   * D1 — auto-trim. Generation is allowed to overshoot the target (a batch is
-   * never a degenerate 1-question prompt), but the Q Set receives exactly the
-   * number that was asked for. The overflow stays in the review screen and can
-   * be swapped in later.
-   */
-  const candidates = kept.slice(0, Math.max(1, job.requestedCount));
-  const trimmed = kept.length - candidates.length;
+
+  let candidates: typeof kept;
+  let trimmed = 0;
+  if (target.candidateIds && target.candidateIds.length > 0) {
+    // The reviewer ticked specific questions: honour that exactly.
+    const chosen = new Set(target.candidateIds);
+    candidates = kept.filter((candidate) => chosen.has(candidate.id));
+    if (candidates.length === 0) {
+      throw validationError("None of the selected questions can be added.");
+    }
+  } else {
+    /**
+     * D1 — auto-trim. Generation is allowed to overshoot the target (a batch is
+     * never a degenerate 1-question prompt), but the Q Set receives exactly the
+     * number that was asked for. The overflow stays in the review screen and can
+     * be swapped in later.
+     */
+    candidates = kept.slice(0, Math.max(1, job.requestedCount));
+    trimmed = kept.length - candidates.length;
+  }
 
   const promoted: CommitOutcome["promoted"] = [];
   const failed: CommitOutcome["failed"] = [];
@@ -1044,4 +1207,105 @@ export async function commitJobToSet(
   });
 
   return { jobId, promoted, failed, createdSet, newSetId: createdSet?.id ?? null, questionIds };
+}
+
+/**
+ * Regenerate ONE internal batch (PIPELINE-PLAN.md §9 / P1).
+ *
+ * Supersede — never delete: the batch's rows are flagged `superseded` and kept
+ * for audit, so a failed regenerate can never destroy the only copy. The job's
+ * counters and concept list are rebuilt from what is still live, which returns
+ * the accepted count to below the target so the next `/step` produces a fresh
+ * batch of the same shape.
+ */
+export async function regenerateBatch(
+  jobId: string,
+  batchNo: number,
+  actorId: string,
+): Promise<{ superseded: number; job: AiGenerationJob }> {
+  const job = await getJob(jobId);
+  if (job.committedAt != null) {
+    throw conflict("This batch has already been added to a Q Set.");
+  }
+
+  const batch = (
+    await db()
+      .select()
+      .from(aiGenerationBatches)
+      .where(and(eq(aiGenerationBatches.jobId, jobId), eq(aiGenerationBatches.batchNo, batchNo)))
+      .limit(1)
+  )[0];
+  if (!batch) throw notFound(`Batch ${batchNo} not found.`);
+  if (batch.status === "superseded") {
+    throw conflict(`Batch ${batchNo} has already been regenerated.`);
+  }
+  if (batch.status === "running") {
+    throw conflict(`Batch ${batchNo} is still running.`);
+  }
+
+  // 1. Supersede the batch's live rows (audited, never deleted).
+  const live = await db()
+    .select()
+    .from(aiCandidates)
+    .where(
+      and(
+        eq(aiCandidates.jobId, jobId),
+        eq(aiCandidates.batchNo, batchNo),
+        eq(aiCandidates.superseded, 0),
+      ),
+    );
+
+  for (const row of live) {
+    await db()
+      .update(aiCandidates)
+      .set({ superseded: 1 })
+      .where(eq(aiCandidates.id, row.id));
+  }
+
+  await db()
+    .update(aiGenerationBatches)
+    .set({ status: "superseded", finishedAt: nowMs() })
+    .where(eq(aiGenerationBatches.id, batch.id));
+
+  // 2. Recompute the job from what is still live.
+  const remaining = await db()
+    .select()
+    .from(aiCandidates)
+    .where(and(eq(aiCandidates.jobId, jobId), eq(aiCandidates.superseded, 0)));
+
+  const accepted = remaining.filter((row) => row.rejected === 0);
+  const flagged = remaining.length - accepted.length;
+  const concepts = conceptsFromCandidates(remaining);
+
+  await db()
+    .update(aiGenerationJobs)
+    .set({
+      producedCount: remaining.length,
+      validCount: remaining.length,
+      duplicateCount: flagged,
+      duplicateSkipped: flagged,
+      acceptedCount: accepted.length,
+      coveredConcepts: concepts.length > 0 ? JSON.stringify(concepts) : null,
+      // A deliberate regenerate earns its own call beyond the original cap.
+      maxCalls: job.maxCalls + 1,
+      status: "running",
+      finishedAt: null,
+      errorCode: null,
+      errorMessage: null,
+    })
+    .where(eq(aiGenerationJobs.id, jobId));
+
+  await recordAudit(actorId, "ai.batch_regenerated", "ai_job", jobId, null, {
+    batchNo,
+    superseded: live.length,
+    acceptedAfter: accepted.length,
+  });
+
+  logInfo("ai", `batch ${batchNo} regenerated for ${jobId}`, {
+    superseded: live.length,
+    acceptedAfter: accepted.length,
+    requested: job.requestedCount,
+  });
+
+  return { superseded: live.length, job: await getJob(jobId) };
 }

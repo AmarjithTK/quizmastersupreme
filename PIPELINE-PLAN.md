@@ -1,7 +1,7 @@
 # PIPELINE-PLAN — Quiz Master generation pipeline
 
-**Status:** P0 SHIPPED (the loop, migration `0007`, 272 tests green) — P1/P2 next.
-Decisions resolved (§13).
+**Status:** **ALL PHASES SHIPPED** — P0 (loop), P1 (review UX), P2 (grounding),
+P3 (telemetry/docs). Migrations `0007` + `0008`, 289 tests green. Decisions resolved (§13).
 Supersedes the "one big call" assumption in `REVAMP-PLAN.md` §3; builds on what already
 ships (auto-opening batch review, flagged duplicates with the matched question, Accept
 override, migration `0006`).
@@ -494,9 +494,9 @@ modules/grounding/
 | Phase | Scope | Est. |
 |---|---|---|
 | **P0 — the loop** ✅ **SHIPPED** | `batchSize` + accepted-target + refill + stall/saturation + `max_calls` + one retry per call; migration `0007` (`accepted_count`, `batch_size`, `max_calls`, `covered_concepts`, `ai_generation_batches`, `ai_candidates.batch_no`/`superseded`); cap raised to 300; commit auto-trims to exactly N; target/batch-size controls + per-batch progress; generation settings editable in Admin → Settings | done |
-| **P1 — review UX** | group by batch, per-batch Regenerate (`superseded` schema is already in place), selection-based commit, job-list cost line | 1 d |
-| **P2 — grounding** | `modules/grounding` + `grounding_cache` + cached shared source pool + toggle + budget; correct the price table | 1–1.5 d |
-| **P3 — telemetry & docs** | per-batch/job cost rollups, concept list surfaced in the admin, docs (`PLAN.md` §12, `MIGRATIONS.md`, `README.md`, this file → IMPLEMENTED) | 0.5 d |
+| **P1 — review UX** ✅ **SHIPPED** | candidates grouped by batch with per-batch header (asked/accepted/flagged, cost, duration); **Regenerate this batch** supersedes its rows and refills in place; checkbox selection with "select all / exactly the target / clear" and `candidateIds` commit; job-row telemetry | done |
+| **P2 — grounding** ✅ **SHIPPED** | `modules/grounding` (research call via the OpenRouter `web` plugin, tolerant fact-sheet parse, `url_citation` capture), `grounding_cache` + TTL, per-job and global mode (off/single/agentic), engine/results/domains settings, failure recorded not fatal, **generation calls never carry the plugin**; price table corrected (V4 Flash 0731 = $0.05/$0.16) and moved to the client-safe `src/lib/pricing.ts` | done |
+| **P3 — telemetry & docs** ✅ **SHIPPED** | per-batch cost/duration in the review headers; grounding cost + cache status on the job row and in progress; live cost estimate on the generate form; docs (`MIGRATIONS.md`, `README.md`, this file) | done |
 
 Each phase leaves the suite green; P0 is the only one that changes observable behaviour
 for existing users, and it only makes big jobs possible.

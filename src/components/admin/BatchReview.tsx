@@ -13,7 +13,7 @@
  * step.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -23,13 +23,30 @@ import {
   Flag,
   FolderPlus,
   Loader2,
+  RefreshCw,
   Save,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+type Batch = {
+  batchNo: number;
+  status: string;
+  asked: number;
+  produced: number;
+  accepted: number;
+  flagged: number;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  costUsd: number | null;
+  durationMs: number | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+};
+
 type Candidate = {
   id: string;
   batchIndex: number | null;
+  batchNo: number | null;
   stem: string;
   optionsJson: string;
   correctOptionKey: string;
@@ -56,13 +73,17 @@ type JobDetail = {
     model: string;
     status: string;
     requestedCount: number;
+    acceptedCount: number;
     producedCount: number;
     duplicateCount: number;
+    batchSize: number;
+    maxCalls: number;
     backfillRound: number;
     committedSetId: string | null;
     committedAt: number | null;
   };
   candidates: Candidate[];
+  batches: Batch[];
 };
 
 type CommitOutcome = {
@@ -112,12 +133,17 @@ export function BatchReview({
   initialTopic?: string;
   sets: SetOption[];
   categories: CategoryOption[];
-  onCommitted?: (outcome: CommitOutcome) => void;
+  onCommitted?: (outcome: CommitOutcome | null) => void;
 }) {
   const [detail, setDetail] = useState<JobDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busyCandidateId, setBusyCandidateId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  /** Which accepted questions will be added (the reviewer's explicit choice). */
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const selectionSignature = useRef<string>("");
+  const [regenerating, setRegenerating] = useState<number | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const [commitMode, setCommitMode] = useState<"existing" | "new">("existing");
   const [targetSetId, setTargetSetId] = useState("");
@@ -134,7 +160,25 @@ export function BatchReview({
     try {
       const res = await fetch(`/api/admin/generation-jobs/${jobId}`);
       if (!res.ok) throw new Error("Could not load the generated questions.");
-      setDetail((await res.json()) as JobDetail);
+      const body = (await res.json()) as JobDetail;
+      setDetail(body);
+
+      /**
+       * Default selection = the first `requestedCount` accepted questions in
+       * batch order. That is the D1 auto-trim, done in the UI so the reviewer
+       * can see and change it. Re-initialised only when the candidate set
+       * actually changed, so a mid-review refresh cannot wipe their choices.
+       */
+      const acceptedIds = body.candidates
+        .filter((candidate) => candidate.rejected !== 1)
+        .map((candidate) => candidate.id);
+      const signature = acceptedIds.join("|");
+      if (signature !== selectionSignature.current) {
+        selectionSignature.current = signature;
+        setSelected(
+          new Set(acceptedIds.slice(0, Math.max(1, body.job.requestedCount))),
+        );
+      }
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : "Could not load the generated questions.");
     }
@@ -167,6 +211,26 @@ export function BatchReview({
   const flagged = candidates.filter((c) => c.dedupeStatus !== "clean");
   const alreadyCommitted = detail.job.committedAt != null;
 
+  // Candidates grouped by the internal call that produced them.
+  const byBatch = new Map<number, Candidate[]>();
+  for (const candidate of candidates) {
+    const key = candidate.batchNo ?? 0;
+    const list = byBatch.get(key);
+    if (list) list.push(candidate);
+    else byBatch.set(key, [candidate]);
+  }
+  const grouped = [...byBatch.entries()].sort((a, b) => a[0] - b[0]);
+  const batchMeta = new Map(detail.batches.map((batch) => [batch.batchNo, batch]));
+
+  function toggleSelected(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
   async function toggleReject(candidate: Candidate) {
     const next = candidate.rejected !== 1;
     setBusyCandidateId(candidate.id);
@@ -190,10 +254,53 @@ export function BatchReview({
             }
           : prev,
       );
+      setSelected((prev) => {
+        const updated = new Set(prev);
+        if (next) updated.delete(candidate.id);
+        else updated.add(candidate.id);
+        return updated;
+      });
     } catch (e) {
       setCommitError(e instanceof Error ? e.message : "Could not save that decision.");
     } finally {
       setBusyCandidateId(null);
+    }
+  }
+
+  /**
+   * Redo one batch: supersede its questions, then drive the job until the
+   * replacement batch has been produced, and reload. One weak batch costs one
+   * call instead of the whole job.
+   */
+  async function regenerate(batchNo: number) {
+    setRegenerating(batchNo);
+    setNotice(null);
+    setCommitError(null);
+    try {
+      const res = await fetch(
+        `/api/admin/generation-jobs/${jobId}/batches/${batchNo}/regenerate`,
+        { method: "POST" },
+      );
+      if (!res.ok) {
+        const body = (await res.json()) as { error?: { message: string } };
+        throw new Error(body.error?.message ?? "Could not regenerate that batch.");
+      }
+
+      // Fill the gap: advance the job until it is terminal again.
+      for (let step = 0; step < 60; step++) {
+        const stepRes = await fetch(`/api/admin/generation-jobs/${jobId}/step`, { method: "POST" });
+        const stepBody = (await stepRes.json()) as { progress?: { done: boolean } };
+        if (!stepRes.ok || !stepBody.progress) break;
+        if (stepBody.progress.done) break;
+      }
+
+      setNotice(`Batch ${batchNo} superseded — a replacement batch was generated.`);
+      await load();
+      onCommitted?.(null);
+    } catch (e) {
+      setCommitError(e instanceof Error ? e.message : "Could not regenerate that batch.");
+    } finally {
+      setRegenerating(null);
     }
   }
 
@@ -209,11 +316,15 @@ export function BatchReview({
         }
       }
 
+      const chosen = [...selected];
+      if (chosen.length === 0) throw new Error("Select at least one question to add.");
+
       const res = await fetch(`/api/admin/generation-jobs/${jobId}/commit`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(
-          commitMode === "existing"
+        body: JSON.stringify({
+          candidateIds: chosen,
+          ...(commitMode === "existing"
             ? { targetSetId }
             : {
                 newSet: {
@@ -222,8 +333,8 @@ export function BatchReview({
                   mode: newMode,
                   difficulty: newDifficulty,
                 },
-              },
-        ),
+              }),
+        }),
       });
       const body = (await res.json()) as { outcome?: CommitOutcome; error?: { message: string } };
       if (!res.ok || !body.outcome) {
@@ -243,6 +354,53 @@ export function BatchReview({
     detail.job.committedSetId && !outcome
       ? sets.find((s) => s.id === detail.job.committedSetId)?.title ?? "a Q Set"
       : outcome?.createdSet?.title ?? sets.find((s) => s.id === targetSetId)?.title;
+
+  /** Per-batch header: what that internal call did, and its regenerate action. */
+  function batchHeader(batchNo: number, group: Candidate[]) {
+    const meta = batchMeta.get(batchNo);
+    const canRegenerate =
+      !alreadyCommitted && meta != null && meta.status !== "superseded" && meta.status !== "running";
+
+    return (
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+        <span className="rounded bg-slate-900 px-2 py-0.5 text-[11px] font-semibold text-white">
+          {batchNo === 0 ? "Batch —" : `Batch ${batchNo}`}
+        </span>
+        <span className="text-[11px] text-slate-600">
+          {meta
+            ? `asked ${meta.asked} · accepted ${meta.accepted} · flagged ${meta.flagged}`
+            : `${group.length} question${group.length === 1 ? "" : "s"}`}
+        </span>
+        {meta?.costUsd != null && (
+          <span className="text-[11px] text-slate-400">
+            · ~${meta.costUsd.toFixed(4)}
+            {meta.durationMs != null && ` · ${(meta.durationMs / 1000).toFixed(1)}s`}
+          </span>
+        )}
+        {meta?.status === "superseded" && (
+          <span className="rounded bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">
+            superseded
+          </span>
+        )}
+        {canRegenerate && (
+          <button
+            type="button"
+            onClick={() => void regenerate(batchNo)}
+            disabled={regenerating !== null}
+            title="Discard this batch's questions and generate replacements (kept for audit)"
+            className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+          >
+            {regenerating === batchNo ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="size-3.5" />
+            )}
+            {regenerating === batchNo ? "Regenerating…" : "Regenerate this batch"}
+          </button>
+        )}
+      </div>
+    );
+  }
 
   return (
     <section className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-5 sm:p-6">
@@ -303,7 +461,10 @@ export function BatchReview({
             This job produced no candidates.
           </p>
         )}
-        {candidates.map((candidate) => {
+        {grouped.map(([batchNo, group]) => (
+          <div key={batchNo} className="flex flex-col gap-3">
+            {batchHeader(batchNo, group)}
+            {group.map((candidate) => {
           const isRejected = rejected.has(candidate.id);
           const isExpanded = expanded.has(candidate.id);
           const isFlagged = candidate.dedupeStatus !== "clean";
@@ -319,7 +480,22 @@ export function BatchReview({
             >
               <div className="flex flex-col gap-2 p-4">
                 <div className="flex flex-wrap items-start justify-between gap-2">
-                  <p className={cn("text-sm font-medium leading-6 text-slate-900", isRejected && "text-slate-500")}>
+                  {!isRejected && (
+                    <input
+                      type="checkbox"
+                      checked={selected.has(candidate.id)}
+                      onChange={() => toggleSelected(candidate.id)}
+                      disabled={alreadyCommitted}
+                      aria-label={`Include this question in the Q Set: ${candidate.stem}`}
+                      className="mt-1.5 size-4 shrink-0 rounded border-slate-300 accent-slate-900"
+                    />
+                  )}
+                  <p
+                    className={cn(
+                      "min-w-40 flex-1 text-sm font-medium leading-6 text-slate-900",
+                      isRejected && "text-slate-500",
+                    )}
+                  >
                     <span className="mr-1.5 text-xs font-semibold text-slate-400">
                       Q{candidate.batchIndex != null ? candidate.batchIndex + 1 : "–"}
                     </span>
@@ -468,18 +644,49 @@ export function BatchReview({
               </div>
             </div>
           );
-        })}
+            })}
+          </div>
+        ))}
       </div>
 
-      {/* ── the kept set stays together ────────────────────────────────────── */}
+      {/* ── what will actually be added ────────────────────────────────────── */}
       {kept.length > 0 && (
         <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-4">
           <h3 className="flex items-center gap-2 text-sm font-semibold text-emerald-900">
             <CheckCircle2 className="size-4" />
-            Will be added — {kept.length} question{kept.length === 1 ? "" : "s"}
+            Will be added — {selected.size} of {kept.length} accepted
           </h3>
+          <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
+            <button
+              type="button"
+              onClick={() => setSelected(new Set(kept.map((c) => c.id)))}
+              className="rounded border border-emerald-300 bg-white px-2 py-0.5 font-semibold text-emerald-800 hover:bg-emerald-50"
+            >
+              Select all {kept.length}
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                setSelected(
+                  new Set(kept.slice(0, Math.max(1, detail.job.requestedCount)).map((c) => c.id)),
+                )
+              }
+              className="rounded border border-emerald-300 bg-white px-2 py-0.5 font-semibold text-emerald-800 hover:bg-emerald-50"
+            >
+              Exactly the target ({detail.job.requestedCount})
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelected(new Set())}
+              className="rounded border border-slate-300 bg-white px-2 py-0.5 font-semibold text-slate-600 hover:bg-slate-50"
+            >
+              Clear
+            </button>
+          </div>
           <ul className="mt-2 flex flex-col gap-1">
-            {kept.map((candidate) => (
+            {kept
+              .filter((candidate) => selected.has(candidate.id))
+              .map((candidate) => (
               <li key={candidate.id} className="text-xs leading-5 text-emerald-900/90">
                 <span className="mr-1.5 font-semibold text-slate-400">
                   Q{candidate.batchIndex != null ? candidate.batchIndex + 1 : "–"}
@@ -662,13 +869,13 @@ export function BatchReview({
               <button
                 type="button"
                 onClick={() => void commit()}
-                disabled={committing}
+                disabled={committing || selected.size === 0}
                 className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
               >
                 {committing ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
                 {committing
                   ? "Adding…"
-                  : `Add ${kept.length} question${kept.length === 1 ? "" : "s"} to Q Set`}
+                  : `Add ${selected.size} selected question${selected.size === 1 ? "" : "s"} to Q Set`}
               </button>
               <span className="text-[11px] text-slate-400">
                 Duplicates stay rejected unless you accepted them. Added questions are active

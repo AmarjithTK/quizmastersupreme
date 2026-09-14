@@ -20,6 +20,11 @@ import type { DrizzleD1Database } from "drizzle-orm/d1";
 import * as schema from "@/db/schema";
 
 /** Parents-first. Restore inserts in this order; wipe deletes in reverse. */
+/**
+ * Tables a backup exports, parents first. `grounding_cache` is deliberately NOT
+ * here: it is a regenerable search cache, not user content — restoring a stale
+ * pool would be worse than paying for a fresh search.
+ */
 export const TABLE_ORDER = [
   "categories",
   "quizSets",

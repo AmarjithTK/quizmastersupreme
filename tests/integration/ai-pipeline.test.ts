@@ -30,6 +30,7 @@ import {
   listJobBatches,
   listJobCandidates,
   outputBudgetFor,
+  regenerateBatch,
   runGenerationStep,
   setCandidateRejected,
   stubProvider,
@@ -728,5 +729,127 @@ describe("createGenerationJob validation", () => {
     expect(job.batchSize).toBe(20);
     // ceil(100/20) = 5 planned calls, plus refill slack.
     expect(job.maxCalls).toBeGreaterThanOrEqual(8);
+  });
+});
+
+// ── P1: per-batch regenerate + selection-based commit ────────────────────────
+
+describe("regenerateBatch (P1)", () => {
+  const batchOf = (call: number, size = 25) =>
+    envelope(...Array.from({ length: size }, (_, i) => question(`Regen probe c${call} q${i}?`)));
+
+  async function twoBatchJob() {
+    const job = await newJob(50, "stub/model", 25);
+    let calls = 0;
+    const d: GenerationDeps = {
+      provider: stubProvider(() => batchOf(++calls)),
+      storage: memoryStorage(),
+    };
+    const progress = await drain(job.id, d);
+    expect(progress.status).toBe("succeeded");
+    expect(progress.acceptedCount).toBe(50);
+    return { job, d };
+  }
+
+  it("supersedes only the targeted batch and rebuilds the job from what is left", async () => {
+    const { job } = await twoBatchJob();
+
+    const before = await listJobCandidates(job.id);
+    expect(before).toHaveLength(50);
+
+    const result = await regenerateBatch(job.id, 1, ACTOR);
+    expect(result.superseded).toBe(25);
+
+    // The discarded batch is flagged, never deleted.
+    const after = await listJobCandidates(job.id);
+    expect(after).toHaveLength(25);
+    expect(after.every((c) => c.batchNo === 2)).toBe(true);
+
+    const batches = await listJobBatches(job.id);
+    expect(batches.find((b) => b.batchNo === 1)!.status).toBe("superseded");
+    expect(batches.find((b) => b.batchNo === 2)!.status).toBe("succeeded");
+
+    // Counters and status are rebuilt, and the job reopens to refill.
+    const updated = await getJob(job.id);
+    expect(updated.acceptedCount).toBe(25);
+    expect(updated.producedCount).toBe(25);
+    expect(updated.status).toBe("running");
+    expect(updated.maxCalls).toBe(job.maxCalls + 1);
+    expect(updated.committedAt).toBeNull();
+  });
+
+  it("produces a replacement batch on the next step", async () => {
+    const { job } = await twoBatchJob();
+    await regenerateBatch(job.id, 1, ACTOR);
+
+    let calls = 0;
+    const d: GenerationDeps = {
+      provider: stubProvider(() => batchOf(100 + ++calls)),
+      storage: memoryStorage(),
+    };
+    const progress = await drain(job.id, d);
+
+    expect(progress.status).toBe("succeeded");
+    expect(progress.acceptedCount).toBe(50);
+
+    // Batch 3 is the replacement; batch 1 is history, batch 2 untouched.
+    const batches = await listJobBatches(job.id);
+    expect(batches.map((b) => b.batchNo)).toEqual([1, 2, 3]);
+    expect(batches.map((b) => b.status)).toEqual(["superseded", "succeeded", "succeeded"]);
+    expect(await listJobCandidates(job.id)).toHaveLength(50);
+  });
+
+  it("refuses an unknown batch and a batch that is still running", async () => {
+    const job = await newJob(25, "stub/model", 25);
+    await expect(regenerateBatch(job.id, 9, ACTOR)).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+describe("selection-based commit (P1)", () => {
+  it("adds only the questions the reviewer selected", async () => {
+    const category = await createCategory({ title: "Select Subject" }, ACTOR);
+    const set = await createSet({ categoryId: category.id, title: "Select Set" }, ACTOR);
+
+    const job = await newJob(5, "stub/model", 5);
+    await runGenerationStep(
+      job.id,
+      deps(
+        envelope(
+          question("Select alpha question?"),
+          question("Select bravo question?"),
+          question("Select charlie question?"),
+          question("Select delta question?"),
+          question("Select echo question?"),
+        ),
+      ),
+    );
+
+    const candidates = await listJobCandidates(job.id);
+    expect(candidates).toHaveLength(5);
+    const chosen = candidates.slice(0, 3).map((c) => c.id);
+
+    const outcome = await commitJobToSet(job.id, ACTOR, { setId: set.id, candidateIds: chosen });
+
+    expect(outcome.promoted).toHaveLength(3);
+    expect(outcome.promoted.map((p) => p.candidateId)).toEqual(chosen);
+    expect(outcome.questionIds).toHaveLength(3);
+
+    const attached = await db()
+      .select({ questionId: schema.questionSetQuestions.questionId })
+      .from(schema.questionSetQuestions)
+      .where(eq(schema.questionSetQuestions.setId, set.id));
+    expect(attached).toHaveLength(3);
+  });
+
+  it("rejects a selection that matches nothing addable", async () => {
+    const category = await createCategory({ title: "Select Empty Subject" }, ACTOR);
+    const set = await createSet({ categoryId: category.id, title: "Select Empty Set" }, ACTOR);
+
+    const job = await newJob(1, "stub/model", 5);
+    await runGenerationStep(job.id, deps(envelope(question("Select lonely question?"))));
+
+    await expect(
+      commitJobToSet(job.id, ACTOR, { setId: set.id, candidateIds: ["candidate__nope"] }),
+    ).rejects.toMatchObject({ code: "VALIDATION" });
   });
 });

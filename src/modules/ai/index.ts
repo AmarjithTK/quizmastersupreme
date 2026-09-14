@@ -17,6 +17,7 @@ export {
   getCandidate,
   setCandidateRejected,
   commitJobToSet,
+  regenerateBatch,
   MAX_REQUESTED_HARD,
   type CommitOutcome,
   type JobProgress,
@@ -34,7 +35,8 @@ export {
   MIN_OUTPUT_TOKENS,
 } from "./budget";
 
-export { openRouterProvider, stubProvider, estimateCostUsd, DEFAULT_MAX_TOKENS, LlmError, type LlmProvider, type GenerationRequest, type GenerationResponse } from "./provider";
+export { estimateCostUsd, estimateJobCostUsd, priceFor } from "@/lib/pricing";
+export { openRouterProvider, stubProvider, DEFAULT_MAX_TOKENS, LlmError, type LlmProvider, type GenerationRequest, type GenerationResponse } from "./provider";
 
 export { configuredProvider, openRouterKeyConfigured, r2RawStorage } from "./adapters";
 

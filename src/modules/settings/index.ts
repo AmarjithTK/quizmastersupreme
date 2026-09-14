@@ -191,6 +191,11 @@ export async function updateAiGenerationSettings(
 // ── Generation pipeline knobs (PIPELINE-PLAN.md §13) ─────────────────────────
 
 export type CountMode = "at_least_trim" | "exact";
+export type GroundingMode = "off" | "single" | "agentic";
+export type GroundingEngine = "exa" | "parallel" | "perplexity";
+
+export const GROUNDING_MODES: readonly GroundingMode[] = ["off", "single", "agentic"];
+export const GROUNDING_ENGINES: readonly GroundingEngine[] = ["exa", "parallel", "perplexity"];
 
 export type GenerationSettings = {
   /** Questions asked per internal call. 25 is the measured sweet spot. */
@@ -203,6 +208,18 @@ export type GenerationSettings = {
   maxCalls: number;
   /** `at_least_trim` aims for >= target and trims at commit; `exact` keeps calling. */
   countMode: CountMode;
+  /** Web grounding: `off`, one research call per job, or agentic multi-search. */
+  groundingMode: GroundingMode;
+  /** Which OpenRouter search engine the `web` plugin should use. */
+  groundingEngine: GroundingEngine;
+  /** Results per search (each result is ~2–4k chars of billed input). */
+  groundingMaxResults: number;
+  /** How long a cached source pool stays usable. */
+  groundingTtlDays: number;
+  /** Comma-separated domain allow-list (empty = anywhere). */
+  groundingIncludeDomains: string;
+  /** Comma-separated domain block-list. */
+  groundingExcludeDomains: string;
 };
 
 export const GENERATION_DEFAULTS: GenerationSettings = {
@@ -211,6 +228,13 @@ export const GENERATION_DEFAULTS: GenerationSettings = {
   minRefill: 5,
   maxCalls: 20,
   countMode: "at_least_trim",
+  // Grounding is a paid, network-dependent stage: opt in.
+  groundingMode: "off",
+  groundingEngine: "exa",
+  groundingMaxResults: 5,
+  groundingTtlDays: 14,
+  groundingIncludeDomains: "",
+  groundingExcludeDomains: "",
 };
 
 export const GENERATION_LIMITS = {
@@ -218,7 +242,11 @@ export const GENERATION_LIMITS = {
   maxRequested: { min: 1, max: 1000 },
   minRefill: { min: 1, max: 25 },
   maxCalls: { min: 1, max: 100 },
+  groundingMaxResults: { min: 1, max: 10 },
+  groundingTtlDays: { min: 0, max: 90 },
 } as const;
+
+type NumericGenerationField = keyof typeof GENERATION_LIMITS;
 
 const GENERATION_KEYS: Record<keyof GenerationSettings, string> = {
   batchSize: "generation.batch_size",
@@ -226,7 +254,16 @@ const GENERATION_KEYS: Record<keyof GenerationSettings, string> = {
   minRefill: "generation.min_refill",
   maxCalls: "generation.max_calls",
   countMode: "generation.count_mode",
+  groundingMode: "generation.grounding_mode",
+  groundingEngine: "generation.grounding_engine",
+  groundingMaxResults: "generation.grounding_max_results",
+  groundingTtlDays: "generation.grounding_ttl_days",
+  groundingIncludeDomains: "generation.grounding_include_domains",
+  groundingExcludeDomains: "generation.grounding_exclude_domains",
 };
+
+/** Longest accepted domain list, to keep a settings row from growing forever. */
+const MAX_DOMAINS_LENGTH = 400;
 
 function clampInt(value: unknown, field: keyof typeof GENERATION_LIMITS): number | null {
   const limits = GENERATION_LIMITS[field];
@@ -259,7 +296,23 @@ export async function getGenerationSettings(): Promise<GenerationSettings> {
       if (parsed === "at_least_trim" || parsed === "exact") result.countMode = parsed;
       continue;
     }
-    const value = clampInt(parsed, field);
+    if (field === "groundingMode") {
+      if (typeof parsed === "string" && GROUNDING_MODES.includes(parsed as GroundingMode)) {
+        result.groundingMode = parsed as GroundingMode;
+      }
+      continue;
+    }
+    if (field === "groundingEngine") {
+      if (typeof parsed === "string" && GROUNDING_ENGINES.includes(parsed as GroundingEngine)) {
+        result.groundingEngine = parsed as GroundingEngine;
+      }
+      continue;
+    }
+    if (field === "groundingIncludeDomains" || field === "groundingExcludeDomains") {
+      if (typeof parsed === "string") result[field] = parsed.slice(0, MAX_DOMAINS_LENGTH);
+      continue;
+    }
+    const value = clampInt(parsed, field as NumericGenerationField);
     if (value !== null) result[field] = value;
   }
 
@@ -283,8 +336,33 @@ export async function updateGenerationSettings(
       continue;
     }
 
-    const limits = GENERATION_LIMITS[field];
-    const number = clampInt(value, field);
+    if (field === "groundingMode") {
+      if (!GROUNDING_MODES.includes(value as GroundingMode)) {
+        throw new Error(`Unknown grounding mode "${String(value)}".`);
+      }
+      await setSetting(GENERATION_KEYS.groundingMode, value, actorId);
+      continue;
+    }
+
+    if (field === "groundingEngine") {
+      if (!GROUNDING_ENGINES.includes(value as GroundingEngine)) {
+        throw new Error(`Unknown grounding engine "${String(value)}".`);
+      }
+      await setSetting(GENERATION_KEYS.groundingEngine, value, actorId);
+      continue;
+    }
+
+    if (field === "groundingIncludeDomains" || field === "groundingExcludeDomains") {
+      if (typeof value !== "string") throw new Error(`${field} must be a string.`);
+      if (value.length > MAX_DOMAINS_LENGTH) {
+        throw new Error(`${field} must be at most ${MAX_DOMAINS_LENGTH} characters.`);
+      }
+      await setSetting(GENERATION_KEYS[field], value.trim(), actorId);
+      continue;
+    }
+
+    const limits = GENERATION_LIMITS[field as NumericGenerationField];
+    const number = clampInt(value, field as NumericGenerationField);
     if (number === null) {
       throw new Error(
         `${field} must be an integer between ${limits.min} and ${limits.max}.`,

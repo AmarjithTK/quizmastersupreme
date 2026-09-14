@@ -62,6 +62,13 @@ export async function POST(request: Request) {
         requestedCount: typeof body.requestedCount === "number" ? body.requestedCount : 25,
         // Per-job batch size; falls back to the admin default in createGenerationJob.
         batchSize: typeof body.batchSize === "number" ? body.batchSize : null,
+        // Per-job grounding override; null = use the global setting.
+        groundingMode:
+          body.groundingMode === "off" ||
+          body.groundingMode === "single" ||
+          body.groundingMode === "agentic"
+            ? body.groundingMode
+            : null,
         difficulty: typeof body.difficulty === "string" ? body.difficulty : null,
         subtopics: Array.isArray(body.subtopics)
           ? body.subtopics.filter((s): s is string => typeof s === "string")
