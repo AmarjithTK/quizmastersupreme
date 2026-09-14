@@ -3,20 +3,21 @@
  *
  *   candidate → ① exact hash → ② FTS5 + Jaccard → ③ embeddings → human
  *
- * Layers 2 and 3 are NOT implemented yet (M11 and M12). `checkCandidate`
- * therefore reports `clean` when layer 1 misses, and `degraded` is set so
- * callers and the UI can be honest that a question has not yet been checked
- * for near- or semantic duplicates.
- *
- * The verdict shape is final, so wiring the later layers in will not change
- * any caller.
+ * Layer 1 auto-rejects: after normalization a match is provable identity.
+ * Layer 2 only FLAGS (§13.6) — "Who created Linux?" and "In what year was Linux
+ * released?" are both good questions, and a similarity score cannot tell that
+ * apart from a genuine duplicate. Layer 3 lands in M12 and is reported as
+ * `degraded` until then, so callers are never told a question is clean when it
+ * has only been checked twice.
  */
 
 import { inArray } from "drizzle-orm";
 import { db } from "@/db/client";
 import { questions } from "@/db/schema";
 import { computeDedupeHashes } from "@/modules/questions/normalize";
+import { getDedupeThresholds, type DedupeThresholds } from "@/modules/settings";
 import { findExactDuplicate, type ExactMatch } from "./layer1-exact";
+import { classifyTextSimilarity, findTextDuplicates } from "./layer2-text";
 
 /** D1 caps bound parameters per statement at ~100; stay clearly under. */
 const MAX_BOUND_PARAMS = 90;
@@ -40,75 +41,52 @@ export type DedupeVerdict = {
   allMatches: DedupeMatch[];
   /** True ONLY for layer-1 exact matches. Never true for fuzzy matches. */
   autoReject: boolean;
-  /** Layers not yet run. Empty once M11/M12 land. */
+  /** Layers not yet run. Empty once M12 lands. */
   degraded: DedupeLayer[];
 };
 
-export async function checkCandidate(input: {
+export type CandidateInput = {
   stem: string;
   optionBodies: string[];
   excludeQuestionId?: string;
-}): Promise<DedupeVerdict> {
-  const { normalizedHash, contentHash } = await computeDedupeHashes(input.stem, input.optionBodies);
+};
 
-  const exact: ExactMatch | null = await findExactDuplicate({
-    normalizedHash,
-    contentHash,
-    excludeQuestionId: input.excludeQuestionId,
-  });
+export type CheckOptions = {
+  /** Pass pre-read thresholds to avoid re-querying inside a batch. */
+  thresholds?: DedupeThresholds;
+};
 
-  if (exact) {
-    const match: DedupeMatch = {
-      questionId: exact.questionId,
-      stem: exact.stem,
-      // Exact matches are identity, so similarity is 1 by definition.
-      similarity: 1,
-      layer: "exact",
-    };
-    return {
-      status: "exact_dup",
-      layer: "exact",
-      normalizedHash,
-      contentHash,
-      bestMatch: match,
-      allMatches: [match],
-      autoReject: true,
-      degraded: [],
-    };
-  }
-
-  return {
-    status: "clean",
-    layer: null,
-    normalizedHash,
-    contentHash,
-    bestMatch: null,
-    allMatches: [],
-    autoReject: false,
-    // Honest about what has NOT been checked yet.
-    degraded: ["text", "semantic"],
-  };
+/** Layer 1 + layer 2 for a single candidate. */
+export async function checkCandidate(
+  input: CandidateInput,
+  options: CheckOptions = {},
+): Promise<DedupeVerdict> {
+  const [verdict] = await checkCandidates(
+    [{ stem: input.stem, optionBodies: input.optionBodies }],
+    { ...options, excludeQuestionId: input.excludeQuestionId },
+  );
+  return verdict!;
 }
 
-export { findExactDuplicate, type ExactMatch };
-
 /**
- * Batch version of `checkCandidate`.
+ * Batch funnel.
  *
- * A generation job produces up to 50 candidates; running the layer-1 query once
- * per candidate would be 50 round trips. This resolves them with ONE query per
- * chunk by matching on the normalized hashes, then maps each verdict back.
- *
- * Layer 1 only, same as `checkCandidate` — layers 2 and 3 land in M11/M12 and
- * are reported as `degraded`.
+ * Layer 1 runs as ONE query per chunk of hashes. Layer 2 still issues one FTS
+ * query per surviving candidate (each needs its own MATCH string), which is why
+ * batch sizes are capped upstream.
  */
 export async function checkCandidates(
   drafts: ReadonlyArray<{ stem: string; optionBodies: string[] }>,
+  options: CheckOptions & { excludeQuestionId?: string } = {},
 ): Promise<DedupeVerdict[]> {
+  if (drafts.length === 0) return [];
+
+  const thresholds = options.thresholds ?? (await getDedupeThresholds());
   const hashes = await Promise.all(
     drafts.map((draft) => computeDedupeHashes(draft.stem, draft.optionBodies)),
   );
 
+  // ── Layer 1: exact, in bulk ─────────────────────────────────────────────
   const existing = new Map<string, { id: string; stem: string }>();
   const allHashes = hashes.map((h) => h.normalizedHash);
 
@@ -121,28 +99,73 @@ export async function checkCandidates(
     for (const row of rows) existing.set(row.normalizedHash, { id: row.id, stem: row.stem });
   }
 
-  return hashes.map((hash) => {
-    const match = existing.get(hash.normalizedHash);
-    if (match) {
-      const best: DedupeMatch = {
-        questionId: match.id,
-        stem: match.stem,
+  const verdicts: DedupeVerdict[] = [];
+
+  for (const [index, hash] of hashes.entries()) {
+    const exact = existing.get(hash.normalizedHash);
+
+    if (exact && exact.id !== options.excludeQuestionId) {
+      const match: DedupeMatch = {
+        questionId: exact.id,
+        stem: exact.stem,
         similarity: 1,
         layer: "exact",
       };
-      return {
+      verdicts.push({
         status: "exact_dup",
         layer: "exact",
         normalizedHash: hash.normalizedHash,
         contentHash: hash.contentHash,
-        bestMatch: best,
-        allMatches: [best],
+        bestMatch: match,
+        allMatches: [match],
         autoReject: true,
         degraded: [],
-      } satisfies DedupeVerdict;
+      });
+      continue;
     }
 
-    return {
+    // ── Layer 2: FTS5 + Jaccard ───────────────────────────────────────────
+    const text = await findTextDuplicates({
+      stem: drafts[index]!.stem,
+      excludeQuestionId: options.excludeQuestionId,
+      limit: 5,
+      threshold: thresholds.jaccardReview * 0.8,
+    });
+
+    const best = text.best;
+    if (best) {
+      const status = classifyTextSimilarity(best.similarity, {
+        reject: thresholds.jaccardReject,
+        review: thresholds.jaccardReview,
+      });
+
+      if (status !== "clean") {
+        verdicts.push({
+          status,
+          layer: "text",
+          normalizedHash: hash.normalizedHash,
+          contentHash: hash.contentHash,
+          // FLAGGED, never auto-rejected: similarity is not identity (§13.6).
+          bestMatch: {
+            questionId: best.questionId,
+            stem: best.stem,
+            similarity: best.similarity,
+            layer: "text",
+          },
+          allMatches: text.matches.map((m) => ({
+            questionId: m.questionId,
+            stem: m.stem,
+            similarity: m.similarity,
+            layer: "text" as const,
+          })),
+          autoReject: false,
+          degraded: ["semantic"],
+        });
+        continue;
+      }
+    }
+
+    verdicts.push({
       status: "clean",
       layer: null,
       normalizedHash: hash.normalizedHash,
@@ -150,7 +173,20 @@ export async function checkCandidates(
       bestMatch: null,
       allMatches: [],
       autoReject: false,
-      degraded: ["text", "semantic"],
-    } satisfies DedupeVerdict;
-  });
+      degraded: ["semantic"],
+    });
+  }
+
+  return verdicts;
 }
+
+export { findExactDuplicate, type ExactMatch };
+export { findTextDuplicates, jaccard, contentWords, classifyTextSimilarity } from "./layer2-text";
+export {
+  sweepExistingQuestions,
+  listDuplicateFlags,
+  resolveDuplicateFlag,
+  openDuplicateCount,
+  type SweepResult,
+  type DuplicateFlagRow,
+} from "./sweep";

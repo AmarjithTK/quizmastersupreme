@@ -1,11 +1,12 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { ClipboardCheck, FileQuestion, History, LayoutGrid, ListChecks, Sparkles } from "lucide-react";
+import { ClipboardCheck, CopyCheck, FileQuestion, History, LayoutGrid, ListChecks, Sparkles } from "lucide-react";
 import { getCurrentPageUser } from "@/lib/server/get-current-user";
 import { ForbiddenCard } from "@/components/admin/forbidden";
 import { listCategoriesForAdmin, listSetsForAdmin } from "@/modules/catalog";
 import { listQuestionsForAdmin } from "@/modules/questions";
 import { pendingReviewCount } from "@/modules/ai";
+import { openDuplicateCount } from "@/modules/dedupe";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Admin" };
@@ -20,11 +21,12 @@ export default async function AdminPage() {
   if (!user) redirect("/login");
   if (user.role !== "admin") return <ForbiddenCard />;
 
-  const [categories, sets, questionPage, pendingCandidates] = await Promise.all([
+  const [categories, sets, questionPage, pendingCandidates, openDuplicates] = await Promise.all([
     listCategoriesForAdmin(),
     listSetsForAdmin(),
     listQuestionsForAdmin({ page: 1, pageSize: 5 }),
     pendingReviewCount(),
+    openDuplicateCount(),
   ]);
   const questionTotal = questionPage.total;
   const publishedSets = sets.filter((s) => s.status === "published").length;
@@ -81,6 +83,14 @@ export default async function AdminPage() {
             pendingCandidates > 0
               ? `${pendingCandidates} awaiting your decision`
               : "Nothing waiting"
+          }
+        />
+        <AdminTile
+          href="/admin/duplicates"
+          icon={<CopyCheck className="size-5" />}
+          title="Duplicates"
+          subtitle={
+            openDuplicates > 0 ? `${openDuplicates} pairs to check` : "No open flags"
           }
         />
       </div>
