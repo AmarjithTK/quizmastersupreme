@@ -30,6 +30,8 @@ export type GeneratedEnv = Cloudflare.Env;
 export interface Bindings extends GeneratedEnv {
   GOOGLE_CLIENT_SECRET: string;
   SESSION_SECRET: string;
+  /** OpenRouter key for AI question generation (M10). */
+  OPENROUTER_API_KEY: string;
 }
 
 export function bindings(): Bindings {

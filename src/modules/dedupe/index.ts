@@ -12,8 +12,14 @@
  * any caller.
  */
 
+import { inArray } from "drizzle-orm";
+import { db } from "@/db/client";
+import { questions } from "@/db/schema";
 import { computeDedupeHashes } from "@/modules/questions/normalize";
 import { findExactDuplicate, type ExactMatch } from "./layer1-exact";
+
+/** D1 caps bound parameters per statement at ~100; stay clearly under. */
+const MAX_BOUND_PARAMS = 90;
 
 export type DedupeStatus = "clean" | "exact_dup" | "near_dup" | "semantic_dup";
 export type DedupeLayer = "exact" | "text" | "semantic";
@@ -85,3 +91,66 @@ export async function checkCandidate(input: {
 }
 
 export { findExactDuplicate, type ExactMatch };
+
+/**
+ * Batch version of `checkCandidate`.
+ *
+ * A generation job produces up to 50 candidates; running the layer-1 query once
+ * per candidate would be 50 round trips. This resolves them with ONE query per
+ * chunk by matching on the normalized hashes, then maps each verdict back.
+ *
+ * Layer 1 only, same as `checkCandidate` — layers 2 and 3 land in M11/M12 and
+ * are reported as `degraded`.
+ */
+export async function checkCandidates(
+  drafts: ReadonlyArray<{ stem: string; optionBodies: string[] }>,
+): Promise<DedupeVerdict[]> {
+  const hashes = await Promise.all(
+    drafts.map((draft) => computeDedupeHashes(draft.stem, draft.optionBodies)),
+  );
+
+  const existing = new Map<string, { id: string; stem: string }>();
+  const allHashes = hashes.map((h) => h.normalizedHash);
+
+  for (let i = 0; i < allHashes.length; i += MAX_BOUND_PARAMS) {
+    const chunk = allHashes.slice(i, i + MAX_BOUND_PARAMS);
+    const rows = await db()
+      .select({ id: questions.id, stem: questions.stem, normalizedHash: questions.normalizedHash })
+      .from(questions)
+      .where(inArray(questions.normalizedHash, chunk));
+    for (const row of rows) existing.set(row.normalizedHash, { id: row.id, stem: row.stem });
+  }
+
+  return hashes.map((hash) => {
+    const match = existing.get(hash.normalizedHash);
+    if (match) {
+      const best: DedupeMatch = {
+        questionId: match.id,
+        stem: match.stem,
+        similarity: 1,
+        layer: "exact",
+      };
+      return {
+        status: "exact_dup",
+        layer: "exact",
+        normalizedHash: hash.normalizedHash,
+        contentHash: hash.contentHash,
+        bestMatch: best,
+        allMatches: [best],
+        autoReject: true,
+        degraded: [],
+      } satisfies DedupeVerdict;
+    }
+
+    return {
+      status: "clean",
+      layer: null,
+      normalizedHash: hash.normalizedHash,
+      contentHash: hash.contentHash,
+      bestMatch: null,
+      allMatches: [],
+      autoReject: false,
+      degraded: ["text", "semantic"],
+    } satisfies DedupeVerdict;
+  });
+}

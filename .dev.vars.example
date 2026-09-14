@@ -18,3 +18,8 @@ GOOGLE_CLIENT_SECRET=""
 # Reserved for future cookie-level integrity/CSRF use; Google verifies the
 # identity token itself today. Generate one with: openssl rand -hex 32
 SESSION_SECRET=""
+# ── AI question generation (M10) ─────────────────────────────────────────────
+# OpenRouter key: https://openrouter.ai/keys
+# Without it the Generate screen explains that it is unconfigured; nothing else
+# in the app depends on it.
+OPENROUTER_API_KEY=""
