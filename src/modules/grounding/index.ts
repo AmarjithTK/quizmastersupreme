@@ -44,7 +44,7 @@ export type SourcePool = {
 };
 
 export type GroundingEngine = "exa" | "parallel" | "perplexity";
-export type GroundingMode = "off" | "single" | "agentic";
+export type GroundingMode = "off" | "single";
 
 export type GroundingSettings = {
   mode: GroundingMode;

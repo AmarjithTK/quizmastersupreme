@@ -21,7 +21,7 @@ type Generation = {
   minRefill: number;
   maxCalls: number;
   countMode: "at_least_trim" | "exact";
-  groundingMode: "off" | "single" | "agentic";
+  groundingMode: "off" | "single";
   groundingEngine: "exa" | "parallel" | "perplexity";
   groundingMaxResults: number;
   groundingTtlDays: number;
@@ -337,7 +337,8 @@ export function AiSettingsPanel({
       <p className="mt-1 text-xs text-slate-500">
         One OpenRouter search per job builds a shared fact sheet that every batch reuses. Search
         is billed <strong>per request</strong> (~$0.007 on Exa), so this runs once and is cached —
-        it is never enabled on the per-batch generation calls.
+        it is never enabled on the per-batch generation calls. Multi-search is intentionally not
+        offered: it would make the cost of a job unpredictable.
       </p>
 
       <div className="mt-4 grid grid-cols-2 gap-3">
@@ -350,7 +351,6 @@ export function AiSettingsPanel({
           >
             <option value="off">off — no search, no cost</option>
             <option value="single">single — one research call per job</option>
-            <option value="agentic">agentic — model decides (multi-search, pricier)</option>
           </select>
         </label>
         <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">

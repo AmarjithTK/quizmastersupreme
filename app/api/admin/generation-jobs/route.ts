@@ -64,9 +64,7 @@ export async function POST(request: Request) {
         batchSize: typeof body.batchSize === "number" ? body.batchSize : null,
         // Per-job grounding override; null = use the global setting.
         groundingMode:
-          body.groundingMode === "off" ||
-          body.groundingMode === "single" ||
-          body.groundingMode === "agentic"
+          body.groundingMode === "off" || body.groundingMode === "single"
             ? body.groundingMode
             : null,
         difficulty: typeof body.difficulty === "string" ? body.difficulty : null,

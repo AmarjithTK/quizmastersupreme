@@ -191,10 +191,10 @@ export async function updateAiGenerationSettings(
 // ── Generation pipeline knobs (PIPELINE-PLAN.md §13) ─────────────────────────
 
 export type CountMode = "at_least_trim" | "exact";
-export type GroundingMode = "off" | "single" | "agentic";
+export type GroundingMode = "off" | "single";
 export type GroundingEngine = "exa" | "parallel" | "perplexity";
 
-export const GROUNDING_MODES: readonly GroundingMode[] = ["off", "single", "agentic"];
+export const GROUNDING_MODES: readonly GroundingMode[] = ["off", "single"];
 export const GROUNDING_ENGINES: readonly GroundingEngine[] = ["exa", "parallel", "perplexity"];
 
 export type GenerationSettings = {
@@ -208,7 +208,15 @@ export type GenerationSettings = {
   maxCalls: number;
   /** `at_least_trim` aims for >= target and trims at commit; `exact` keeps calling. */
   countMode: CountMode;
-  /** Web grounding: `off`, one research call per job, or agentic multi-search. */
+  /**
+   * Web grounding: `off`, or ONE research call per job into a shared pool.
+   *
+   * There is deliberately no "let the model search as much as it likes" mode:
+   * search is billed per request, so the deterministic single call is the only
+   * shape whose cost we can promise. Multi-search (the `openrouter:web_search`
+   * server tool with `max_total_results`) is the documented upgrade path in
+   * PIPELINE-PLAN.md §8 and would land behind this same setting.
+   */
   groundingMode: GroundingMode;
   /** Which OpenRouter search engine the `web` plugin should use. */
   groundingEngine: GroundingEngine;

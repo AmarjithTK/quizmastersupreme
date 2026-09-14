@@ -522,9 +522,10 @@ Editable: `generation.count_mode = at_least_trim | exact`, `generation.min_refil
 One **research call** per job using the `web` plugin, `engine: "exa"`, `max_results: 5`,
 producing a shared source pool that every batch reuses as text. $0.007 once per job
 (+ result tokens), cached 14 days → **$0** on repeat topics. User-supplied sources skip
-the search entirely. Upgrade path: the `openrouter:web_search` server tool with
-`max_total_results` for multi-query research (2–3 searches, ~$0.014–0.021) — same
-interface, config flag `generation.grounding_mode = single | agentic`.
+the search entirely. Upgrade path (not built): the `openrouter:web_search` server tool with
+`max_total_results` for multi-query research (2–3 searches, ~$0.014–0.021). It would
+land behind the same `grounding_mode` setting as a third value; it is left out on
+purpose because per-request billing makes a multi-search job's cost unpredictable.
 
 *Why not ground per batch:* the fee is per request, so per-batch grounding costs ~4×
 the whole generation and adds no information the pool does not already carry.
@@ -588,7 +589,7 @@ Not user-configurable: it is an internal invariant, not a preference.
 | `generation.count_mode` | `at_least_trim` | `at_least_trim` / `exact` | global |
 | `generation.min_refill` | 5 | 1–25 | global |
 | `generation.max_calls` | 20 | 1–100 | global + per job |
-| `generation.grounding_mode` | `single` | `single` / `agentic` / `off` | global + per job |
+| `generation.grounding_mode` | `off` | `off` / `single` | global + per job |
 | `generation.grounding_engine` | `exa` | `exa` / `parallel` / `perplexity` | global |
 | `generation.grounding_max_results` | 5 | 1–10 | global |
 | `generation.grounding_ttl_days` | 14 | 0–90 | global |

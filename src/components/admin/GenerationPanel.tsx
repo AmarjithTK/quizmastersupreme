@@ -94,7 +94,7 @@ export function GenerationPanel({
   /** Global `generation.max_requested` ceiling. */
   maxRequested?: number;
   /** Global `generation.grounding_mode`; overridable per job. */
-  defaultGroundingMode?: "off" | "single" | "agentic";
+  defaultGroundingMode?: "off" | "single";
   categories: Array<{ id: string; title: string }>;
   sets: Array<{ id: string; title: string; status: string; categoryTitle?: string }>;
 }) {
@@ -345,13 +345,12 @@ export function GenerationPanel({
             <select
               value={groundingMode}
               onChange={(e) =>
-                setGroundingMode(e.target.value as "off" | "single" | "agentic")
+                setGroundingMode(e.target.value as "off" | "single")
               }
               className={field}
             >
               <option value="off">off — no search</option>
               <option value="single">one search per job</option>
-              <option value="agentic">agentic — multi-search</option>
             </select>
             <span className="text-[10px] font-normal text-slate-400">
               one research call, cached for later jobs
