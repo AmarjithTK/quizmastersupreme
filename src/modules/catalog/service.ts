@@ -268,3 +268,43 @@ export async function listSetsForAdmin(categoryId?: string): Promise<SetRowAdmin
     questionCount: Number(row.questionCount ?? 0),
   }));
 }
+
+/** One set with its counts — the membership screen's header. */
+export async function getSetForAdmin(id: string): Promise<SetRowAdmin | null> {
+  const rows = await db()
+    .select({
+      id: quizSets.id,
+      categoryId: quizSets.categoryId,
+      categoryTitle: categories.title,
+      slug: quizSets.slug,
+      title: quizSets.title,
+      description: quizSets.description,
+      groupLabel: quizSets.groupLabel,
+      mode: quizSets.mode,
+      difficulty: quizSets.difficulty,
+      timeLimitSeconds: quizSets.timeLimitSeconds,
+      questionLimit: quizSets.questionLimit,
+      shuffleQuestions: quizSets.shuffleQuestions,
+      shuffleOptions: quizSets.shuffleOptions,
+      passingPercent: quizSets.passingPercent,
+      sortOrder: quizSets.sortOrder,
+      status: quizSets.status,
+      publishedAt: quizSets.publishedAt,
+      questionCount: sql<number>`count(${questionSetQuestions.questionId})`,
+    })
+    .from(quizSets)
+    .innerJoin(categories, eq(categories.id, quizSets.categoryId))
+    .leftJoin(questionSetQuestions, eq(questionSetQuestions.setId, quizSets.id))
+    .where(eq(quizSets.id, id))
+    .groupBy(quizSets.id)
+    .limit(1);
+
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    ...row,
+    mode: row.mode as "practice" | "mock",
+    status: row.status as PublishState,
+    questionCount: Number(row.questionCount ?? 0),
+  };
+}

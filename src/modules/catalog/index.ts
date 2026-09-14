@@ -10,6 +10,7 @@ export {
   listSetsForCategory,
   listCategoriesForAdmin,
   listSetsForAdmin,
+  getSetForAdmin,
   groupSets,
   type CategoryCard,
   type SetCardData,

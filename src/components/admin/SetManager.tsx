@@ -11,7 +11,8 @@
  * confined to toPayload/fromRow so nothing else has to remember the unit.
  */
 
-import { ArrowDown, ArrowUp, Pencil, Plus, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ListChecks, Pencil, Plus, Trash2, X } from "lucide-react";
+import Link from "next/link";
 import { useMemo, useState, useTransition } from "react";
 import { cn, formatDuration } from "@/lib/utils";
 
@@ -361,6 +362,15 @@ export function SetManager({
                         >
                           {row.status === "published" ? "Published" : "Publish"}
                         </button>
+                        <Link
+                          href={`/admin/sets/${row.id}/questions`}
+                          title="Manage this set's questions"
+                          className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100"
+                        >
+                          <ListChecks className="size-3.5" />
+                          Questions
+                          <span className="tabular-nums text-slate-400">{row.questionCount}</span>
+                        </Link>
                         <button
                           type="button"
                           aria-label="Edit"

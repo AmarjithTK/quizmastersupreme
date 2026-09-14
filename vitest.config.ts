@@ -1,7 +1,11 @@
+import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  // tsconfig uses `jsx: "preserve"` for the app build, so vitest needs its own
+  // JSX transform to compile .tsx component tests.
+  plugins: [react()],
   resolve: {
     // Vite does not read tsconfig `paths` on its own, so the `@/` alias has to
     // be declared here too. Keep in sync with tsconfig.json.
@@ -17,7 +21,8 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["tests/**/*.test.ts"],
+    // .tsx is included for component tests (the backstory renderer).
+    include: ["tests/**/*.test.ts", "tests/**/*.test.tsx"],
     globalSetup: ["tests/global-setup.ts"],
     // Integration tests share one local D1 file; run them serially.
     fileParallelism: false,

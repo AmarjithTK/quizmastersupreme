@@ -1,9 +1,10 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { LayoutGrid, ListChecks } from "lucide-react";
+import { FileQuestion, LayoutGrid, ListChecks } from "lucide-react";
 import { getCurrentPageUser } from "@/lib/server/get-current-user";
 import { ForbiddenCard } from "@/components/admin/forbidden";
 import { listCategoriesForAdmin, listSetsForAdmin } from "@/modules/catalog";
+import { listQuestionsForAdmin } from "@/modules/questions";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Admin" };
@@ -18,7 +19,12 @@ export default async function AdminPage() {
   if (!user) redirect("/login");
   if (user.role !== "admin") return <ForbiddenCard />;
 
-  const [categories, sets] = await Promise.all([listCategoriesForAdmin(), listSetsForAdmin()]);
+  const [categories, sets, questionPage] = await Promise.all([
+    listCategoriesForAdmin(),
+    listSetsForAdmin(),
+    listQuestionsForAdmin({ page: 1, pageSize: 5 }),
+  ]);
+  const questionTotal = questionPage.total;
   const publishedSets = sets.filter((s) => s.status === "published").length;
   const draftSets = sets.length - publishedSets;
 
@@ -29,7 +35,8 @@ export default async function AdminPage() {
         <p className="mt-1 text-sm text-slate-500">
           {categories.length} {categories.length === 1 ? "subject" : "subjects"} ·{" "}
           {sets.length} {sets.length === 1 ? "set" : "sets"} ({publishedSets} published
-          {draftSets > 0 && `, ${draftSets} not live`})
+          {draftSets > 0 && `, ${draftSets} not live`}) · {questionTotal}{" "}
+          {questionTotal === 1 ? "question" : "questions"}
         </p>
       </header>
 
@@ -46,11 +53,19 @@ export default async function AdminPage() {
           title="Quiz sets"
           subtitle="Playable papers inside a subject"
         />
+        <AdminTile
+          href="/admin/questions"
+          icon={<FileQuestion className="size-5" />}
+          title="Questions"
+          subtitle="The shared bank, reusable across sets"
+        />
       </div>
 
-      <p className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center text-sm text-slate-500">
-        Questions and AI generation arrive in the next milestones.
-      </p>
+      {questionTotal === 0 && (
+        <p className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center text-sm text-slate-500">
+          No questions yet. Author one in the bank, then attach it to a set.
+        </p>
+      )}
     </div>
   );
 }
