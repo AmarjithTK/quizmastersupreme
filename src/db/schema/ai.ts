@@ -25,6 +25,10 @@ export const aiGenerationJobs = sqliteTable(
     /** The admin's natural-language instruction. */
     brief: text("brief").notNull(),
     topic: text("topic").notNull(),
+    /** Who/what the questions are for (audience or exam). Optional. */
+    target: text("target"),
+    /** Authoritative references the model must stay within. Optional. */
+    sources: text("sources"),
     /** JSON array. */
     subtopics: text("subtopics"),
     difficulty: text("difficulty"),
@@ -39,6 +43,10 @@ export const aiGenerationJobs = sqliteTable(
      */
     providerOnly: text("provider_only"),
     providerOrder: text("provider_order"),
+
+    /** The Q Set the whole approved batch was committed to (batch flow). */
+    committedSetId: text("committed_set_id"),
+    committedAt: integer("committed_at"),
 
     provider: text("provider").notNull().default("openrouter"),
     model: text("model").notNull(),

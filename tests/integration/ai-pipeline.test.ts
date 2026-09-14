@@ -10,7 +10,7 @@
  * writes to `questions` (PLAN.md §2.2). Everything else is detail.
  */
 
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { getPlatformProxy } from "wrangler";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -18,6 +18,7 @@ import { db, setDbForTests } from "@/db/client";
 import * as schema from "@/db/schema";
 import {
   createGenerationJob,
+  commitJobToSet,
   promptVersionStats,
   getJob,
   listCandidates,
@@ -29,6 +30,7 @@ import {
   type GenerationRequest,
   type RawStorage,
 } from "@/modules/ai";
+import { createCategory, createSet } from "@/modules/catalog";
 
 const ACTOR = "user__ai_test";
 const TOPIC = "AiPipelineTest";
@@ -486,6 +488,132 @@ describe("provider routing forwarding (only/order)", () => {
 
     await db().delete(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, job.id)).run();
     await db().delete(schema.aiGenerationJobs).where(eq(schema.aiGenerationJobs.id, job.id)).run();
+  });
+});
+
+// ── the batch flow: review one generation, commit to a Q Set ──────────────────
+
+async function finishedJob(n: number): Promise<string> {
+  const job = await createGenerationJob(
+    { topic: TOPIC, brief: "Write test questions.", requestedCount: n, model: "stub/model" },
+    ACTOR,
+  );
+  const questions = Array.from({ length: n }, (_, i) => question(`Batch flow question ${i + 1}?`));
+  const d = deps(envelope(...questions));
+  await runGenerationStep(job.id, d);
+  await runGenerationStep(job.id, d);
+  return job.id;
+}
+
+describe("the batch flow (generate → review → commit to a Q Set)", () => {
+  it("persists target/sources on the job and puts them in the prompt", async () => {
+    const job = await createGenerationJob(
+      {
+        topic: TOPIC,
+        brief: "Write test questions.",
+        requestedCount: 1,
+        model: "stub/model",
+        target: "Class 10 Kerala students",
+        sources: "https://kerala.gov.in/cyber-security and the 2017 policy document",
+      },
+      ACTOR,
+    );
+
+    let seen: GenerationRequest | null = null;
+    await runGenerationStep(job.id, {
+      provider: stubProvider((request) => {
+        seen = request;
+        return envelope(question("Target and sources in prompt?"));
+      }),
+      storage: memoryStorage(),
+    });
+
+    expect(seen!.user).toContain("TARGET: Class 10 Kerala students");
+    expect(seen!.user).toContain("SOURCES (authoritative");
+
+    const stored = await getJob(job.id);
+    expect(stored.target).toBe("Class 10 Kerala students");
+    expect(stored.sources).toContain("2017 policy document");
+
+    await db().delete(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, job.id)).run();
+    await db().delete(schema.aiGenerationJobs).where(eq(schema.aiGenerationJobs.id, job.id)).run();
+  });
+
+  it("commits the non-rejected set to an EXISTING Q Set, in order", async () => {
+    const category = await createCategory({ title: "Batch Cat", slug: "batch-cat" }, ACTOR);
+    const set = await createSet({ categoryId: category.id, title: "Batch Set" }, ACTOR);
+
+    const jobId = await finishedJob(3);
+    const candidates = await listCandidates({ jobId, limit: 20 });
+    expect(candidates).toHaveLength(3);
+
+    // Reject the middle one — it must not be committed.
+    await reviewCandidate(candidates[1]!.id, "rejected", ACTOR);
+
+    const outcome = await commitJobToSet(jobId, ACTOR, { setId: set.id });
+    expect(outcome.promoted).toHaveLength(2);
+    expect(outcome.questionIds).toHaveLength(2);
+    expect(outcome.createdSet).toBeNull();
+
+    // Both survivors became real questions, in batch order.
+    const qids = outcome.promoted.map((p) => p.questionId);
+    const rows = await db()
+      .select({ questionId: schema.questionSetQuestions.questionId, order: schema.questionSetQuestions.sortOrder })
+      .from(schema.questionSetQuestions)
+      .where(eq(schema.questionSetQuestions.setId, set.id));
+    expect(rows.map((r) => r.questionId)).toEqual(qids);
+    expect(rows.map((r) => r.order)).toEqual([0, 1]);
+
+    // The job remembers what it was committed to.
+    const stored = await getJob(jobId);
+    expect(stored.committedSetId).toBe(set.id);
+
+    await db().delete(schema.questions).where(inArray(schema.questions.id, qids)).run();
+    await db().delete(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, jobId)).run();
+    await db().delete(schema.aiGenerationJobs).where(eq(schema.aiGenerationJobs.id, jobId)).run();
+    await db().delete(schema.quizSets).where(eq(schema.quizSets.id, set.id)).run();
+    await db().delete(schema.categories).where(eq(schema.categories.id, category.id)).run();
+  });
+
+  it("creates a NEW Q Set and commits the whole approved set to it", async () => {
+    const category = await createCategory({ title: "Batch Cat 2", slug: "batch-cat-2" }, ACTOR);
+    const jobId = await finishedJob(2);
+
+    const outcome = await commitJobToSet(jobId, ACTOR, {
+      newSet: { title: "Fresh Generated Set", categoryId: category.id, mode: "practice", difficulty: "medium" },
+    });
+    expect(outcome.createdSet).not.toBeNull();
+    expect(outcome.promoted).toHaveLength(2);
+    expect(outcome.newSetId).toBe(outcome.createdSet!.id);
+
+    const attached = await db()
+      .select({ questionId: schema.questionSetQuestions.questionId })
+      .from(schema.questionSetQuestions)
+      .where(eq(schema.questionSetQuestions.setId, outcome.createdSet!.id));
+    expect(attached).toHaveLength(2);
+
+    const stored = await getJob(jobId);
+    expect(stored.committedSetId).toBe(outcome.createdSet!.id);
+
+    await db().delete(schema.questions).where(inArray(schema.questions.id, outcome.questionIds)).run();
+    await db().delete(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, jobId)).run();
+    await db().delete(schema.aiGenerationJobs).where(eq(schema.aiGenerationJobs.id, jobId)).run();
+    await db().delete(schema.quizSets).where(eq(schema.quizSets.id, outcome.createdSet!.id)).run();
+    await db().delete(schema.categories).where(eq(schema.categories.id, category.id)).run();
+  });
+
+  it("refuses to commit without exactly one target", async () => {
+    const jobId = await finishedJob(1);
+    await expect(commitJobToSet(jobId, ACTOR, {})).rejects.toThrow("Choose exactly one");
+    await expect(
+      commitJobToSet(jobId, ACTOR, {
+        setId: "some-set",
+        newSet: { title: "X", categoryId: "c" },
+      }),
+    ).rejects.toThrow("Choose exactly one");
+
+    await db().delete(schema.aiCandidates).where(eq(schema.aiCandidates.jobId, jobId)).run();
+    await db().delete(schema.aiGenerationJobs).where(eq(schema.aiGenerationJobs.id, jobId)).run();
   });
 });
 

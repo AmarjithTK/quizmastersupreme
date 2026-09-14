@@ -11,11 +11,16 @@
  *
  * v1 — initial.
  * v2 — (M13) adds the coverage digest block.
+ * v3 — (M14) adds TARGET and SOURCES lines (sources are authoritative).
  */
-export const PROMPT_VERSION = "v2-coverage";
+export const PROMPT_VERSION = "v3-target-sources";
 
 export type GenerationPromptInput = {
   topic: string;
+  /** Who/what the questions are for — audience or exam. */
+  target?: string | null;
+  /** Authoritative references the model must stay within. */
+  sources?: string | null;
   subtopics?: string[] | null;
   difficulty?: string | null;
   examBody?: string | null;
@@ -49,6 +54,7 @@ export function buildSystemPrompt(): string {
 export function buildUserPrompt(input: GenerationPromptInput): string {
   const lines: string[] = [
     `TOPIC: ${input.topic}`,
+    `TARGET: ${input.target?.trim() || "(not specified)"}`,
     `SUBTOPICS: ${input.subtopics?.length ? input.subtopics.join(", ") : "(none specified)"}`,
     `DIFFICULTY: ${input.difficulty ?? "medium"}`,
     `STYLE / EXAM BODY: ${input.examBody ?? "general competitive exam"}`,
@@ -58,6 +64,14 @@ export function buildUserPrompt(input: GenerationPromptInput): string {
     input.brief.trim() || "(no extra instructions)",
     "",
   ];
+
+  if (input.sources?.trim()) {
+    lines.push(
+      "SOURCES (authoritative — base every question on these, and do not go beyond them):",
+      input.sources.trim(),
+      "",
+    );
+  }
 
   if (input.coverageDigest?.trim()) {
     lines.push(

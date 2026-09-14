@@ -59,6 +59,8 @@ export async function POST(request: Request) {
           ? body.avoidTopics.filter((s): s is string => typeof s === "string")
           : null,
         model,
+        target: typeof body.target === "string" ? body.target : null,
+        sources: typeof body.sources === "string" ? body.sources : null,
         providerOnly: routing.only.length > 0 ? routing.only : null,
         providerOrder: routing.order.length > 0 ? routing.order : null,
         targetCategoryId: typeof body.targetCategoryId === "string" ? body.targetCategoryId : null,
@@ -67,7 +69,12 @@ export async function POST(request: Request) {
       actor.id,
     );
 
-    logInfo("route", `job ${job.id} created by admin ${actor.id}`, { topic: job.topic, model: job.model });
+    logInfo("route", `job ${job.id} created by admin ${actor.id}`, {
+      topic: job.topic,
+      model: job.model,
+      hasTarget: Boolean(job.target),
+      hasSources: Boolean(job.sources),
+    });
     return jsonResponse({ job }, { status: 201 });
   } catch (error) {
     return errorResponse(error);

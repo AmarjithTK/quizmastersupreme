@@ -5,6 +5,7 @@ import { bindings } from "@/lib/cloudflare/bindings";
 import { listCategoriesForAdmin } from "@/modules/catalog";
 import { listJobs, openRouterKeyConfigured, promptVersionStats, type PromptVersionStats } from "@/modules/ai";
 import { getAiGenerationSettings } from "@/modules/settings";
+import { listSetsForAdmin } from "@/modules/catalog";
 import { GenerationPanel } from "@/components/admin/GenerationPanel";
 import { ForbiddenCard } from "@/components/admin/forbidden";
 
@@ -22,11 +23,12 @@ export default async function AdminGeneratePage() {
   if (!user) redirect("/login");
   if (user.role !== "admin") return <ForbiddenCard />;
 
-  const [jobs, categories, stats, aiSettings] = await Promise.all([
+  const [jobs, categories, stats, aiSettings, sets] = await Promise.all([
     listJobs(30),
     listCategoriesForAdmin(),
     promptVersionStats(),
     getAiGenerationSettings(),
+    listSetsForAdmin(),
   ]);
 
   return (
@@ -57,6 +59,12 @@ export default async function AdminGeneratePage() {
       <PromptStats stats={stats} />
 
       <GenerationPanel
+        sets={sets.map((set) => ({
+          id: set.id,
+          title: set.title,
+          status: set.status,
+          categoryTitle: set.categoryTitle,
+        }))}
         initialJobs={jobs.map((job) => ({
           id: job.id,
           topic: job.topic,

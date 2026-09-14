@@ -4,7 +4,7 @@ Single source of truth for every schema change applied to the D1 database.
 If a migration is not listed here, treat it as not real. **Migrations are
 append-only: never edit an applied migration — add a new one.**
 
-Current tip: **`0003_provider_routing`**
+Current tip: **`0004_ai_job_inputs`**
 
 ## How migrations work here
 
@@ -27,6 +27,7 @@ Current tip: **`0003_provider_routing`**
 | 0001 | `0001_fts5.sql` | **Hand-written** | FTS5 virtual table `questions_fts` (porter + unicode61 tokenizer) with 3 triggers (insert / delete / update) that keep it in sync with `questions`. Powers admin question search (§9.4) and dedupe layer 2 (§13.4). | M0 |
 | 0002 | `0002_tan_satana.sql` | **Hand-written** | Google OIDC: new `oauth_states` table (PKCE + state params), Rebuilds `users` with Google columns (`google_sub`, `google_email`, `google_name`, `google_avatar_url`, …), drops the old users table under `PRAGMA foreign_keys=OFF`, adds `sessions.last_seen_at` / `ip_hash`/`user_agent` and indexes. | M1 |
 | 0003 | `0003_provider_routing.sql` | Hand-written (tiny) | Adds `provider_only` and `provider_order` (TEXT, JSON arrays of OpenRouter provider slugs) to `ai_generation_jobs` — the `provider.only` / `provider.order` cost-control routing. | M14+ |
+| 0004 | `0004_ai_job_inputs.sql` | Hand-written (tiny) | Adds `target`, `sources` (generation input context) and `committed_set_id`, `committed_at` (batch-commit marker) to `ai_generation_jobs`. | M14+ |
 
 ## Adding a new migration (the rules)
 

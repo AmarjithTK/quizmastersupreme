@@ -14,7 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { db, setDbForTests } from "@/db/client";
 import * as schema from "@/db/schema";
 import { buildCoverageDigest, createGenerationJob, extractConceptKey, estimateTokens } from "@/modules/ai";
-import { buildUserPrompt } from "@/modules/ai";
+import { buildUserPrompt, PROMPT_VERSION } from "@/modules/ai";
 import { createQuestion, type QuestionDraft } from "@/modules/questions";
 
 const ACTOR = "user__coverage_test";
@@ -269,7 +269,7 @@ describe("jobs persist their digest", () => {
     expect(job.coverageDigest).toContain("ALREADY COVERED");
     // Cost is attributable after the fact because the digest is stored.
     expect(job.coverageTokens).toBeGreaterThan(0);
-    expect(job.promptVersion).toContain("coverage");
+    expect(job.promptVersion).toBe(PROMPT_VERSION);
   });
 
   it("stores no digest for a topic with no existing coverage", async () => {

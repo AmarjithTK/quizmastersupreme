@@ -12,9 +12,10 @@
  * queue, and a human promotes it (§2.2).
  */
 
-import { AlertCircle, Loader2, Play, Sparkles } from "lucide-react";
+import { AlertCircle, Flag, Loader2, Play, Sparkles } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
+import { BatchReview } from "@/components/admin/BatchReview";
 
 type Job = {
   id: string;
@@ -60,19 +61,26 @@ export function GenerationPanel({
   configured,
   defaultModel,
   categories,
+  sets,
 }: {
   initialJobs: Job[];
   configured: boolean;
   defaultModel: string;
   categories: Array<{ id: string; title: string }>;
+  sets: Array<{ id: string; title: string; status: string; categoryTitle?: string }>;
 }) {
   const [jobs, setJobs] = useState<Job[]>(initialJobs);
   const [topic, setTopic] = useState("");
   const [brief, setBrief] = useState("");
+  const [target, setTarget] = useState("");
+  const [sources, setSources] = useState("");
   const [count, setCount] = useState("10");
   const [difficulty, setDifficulty] = useState("medium");
   const [model, setModel] = useState(defaultModel);
   const [categoryId, setCategoryId] = useState("");
+
+  /** The job whose generated set is open in the batch view below. */
+  const [batchJobId, setBatchJobId] = useState<string | null>(null);
 
   const [runningJobId, setRunningJobId] = useState<string | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
@@ -101,6 +109,8 @@ export function GenerationPanel({
         body: JSON.stringify({
           topic,
           brief,
+          target: target.trim() || null,
+          sources: sources.trim() || null,
           requestedCount: Number(count) || 10,
           difficulty,
           model,
@@ -114,6 +124,7 @@ export function GenerationPanel({
 
       const jobId = created.job.id;
       setRunningJobId(jobId);
+      setBatchJobId(jobId);
       await refetch();
 
       // Advance until the job says it is done. Each call is one bounded step.
@@ -130,6 +141,8 @@ export function GenerationPanel({
 
       setTopic("");
       setBrief("");
+      setTarget("");
+      setSources("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong");
     } finally {
@@ -189,7 +202,29 @@ export function GenerationPanel({
         </div>
 
         <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
-          Brief *
+          Target (optional)
+          <input
+            value={target}
+            onChange={(e) => setTarget(e.target.value)}
+            className={field}
+            placeholder="Class 10 students / Kerala PSC exam / UPSC prelims…"
+          />
+        </label>
+
+        <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
+          Sources (optional)
+          <textarea
+            value={sources}
+            onChange={(e) => setSources(e.target.value)}
+            rows={2}
+            className={field}
+            placeholder="Only base questions on these: e.g. https://kerala.gov.in/cyber-security, Cyberdome 2015 report…"
+          />
+        </label>
+
+        <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
+          Brief *{" "}
+          <span className="font-normal text-slate-400">(specific instructions)</span>
           <textarea
             value={brief}
             onChange={(e) => setBrief(e.target.value)}
@@ -271,6 +306,16 @@ export function GenerationPanel({
         </div>
       )}
 
+      {/* The batch view: ALL questions from one generation together. */}
+      {batchJobId && (
+        <BatchReview
+          key={batchJobId}
+          jobId={batchJobId}
+          sets={sets}
+          categories={categories}
+        />
+      )}
+
       <section className="flex flex-col gap-2">
         <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Recent jobs</h2>
 
@@ -329,6 +374,14 @@ export function GenerationPanel({
                     timeStyle: "short",
                   })}
                 </span>
+                <button
+                  type="button"
+                  onClick={() => setBatchJobId(job.id)}
+                  className="inline-flex items-center gap-1 rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-200"
+                >
+                  <Flag className="size-3" />
+                  Review batch
+                </button>
                 {job.status === "queued" && (
                   <button
                     type="button"

@@ -89,6 +89,10 @@ export type CreateJobInput = {
   /** OpenRouter provider slugs — allow-list (only) and priority (order). */
   providerOnly?: string[] | null;
   providerOrder?: string[] | null;
+  /** Who/what the questions are for (audience or exam). */
+  target?: string | null;
+  /** Authoritative references the model must stay within. */
+  sources?: string | null;
 };
 
 /** Deterministic slug validation: non-empty, alphanumerics + dash/underscore. */
@@ -146,6 +150,10 @@ export async function createGenerationJob(
     providerOrder: normalizeProviderSlugs(input.providerOrder)
       ? JSON.stringify(normalizeProviderSlugs(input.providerOrder))
       : null,
+    target: input.target?.trim() || null,
+    sources: input.sources?.trim() || null,
+    committedSetId: null,
+    committedAt: null,
     provider: "openrouter",
     model: input.model.trim(),
     temperature: input.temperature ?? null,
@@ -266,6 +274,8 @@ async function generateStage(job: AiGenerationJob, deps: GenerationDeps): Promis
   const system = buildSystemPrompt();
   const user = buildUserPrompt({
     topic: job.topic,
+    target: job.target,
+    sources: job.sources,
     subtopics: job.subtopics ? (JSON.parse(job.subtopics) as string[]) : null,
     difficulty: job.difficulty,
     examBody: null,
@@ -797,4 +807,145 @@ export async function promptVersionStats(): Promise<PromptVersionStats[]> {
       duplicateRate: produced === 0 ? 0 : Number(row.duplicates) / produced,
     };
   });
+}
+
+
+// ── the batch flow: review a whole generation, then commit it to a Q Set ─────
+
+export type CommitOutcome = {
+  jobId: string;
+  /** Promoted candidates, in batch order. */
+  promoted: Array<{ candidateId: string; questionId: string }>;
+  /** Candidates that could not be promoted, with the reason. */
+  failed: Array<{ candidateId: string; reason: string }>;
+  /** Applied only when promoting to a NEW set. */
+  createdSet: { id: string; title: string } | null;
+  newSetId: string | null;
+  questionIds: string[];
+};
+
+/**
+ * Promote every NON-rejected candidate of a job into the question bank.
+ *
+ * The batch flow's semantics: within one generation, "kept" is the default —
+ * the admin rejects individual questions one by one, and everything that
+ * survives is the approved set. Candidates already promoted (e.g. via the
+ * classic review queue) are skipped silently; invalid or funnel-rejected ones
+ * are reported, never thrown.
+ */
+export async function commitJobCandidates(
+  jobId: string,
+  actorId: string,
+): Promise<{ promoted: CommitOutcome["promoted"]; failed: CommitOutcome["failed"] }> {
+  const job = await getJob(jobId);
+  const candidates = await listCandidates({ jobId: job.id, limit: 200 });
+
+  const ordered = candidates
+    .filter((candidate) => candidate.reviewStatus !== "rejected")
+    .sort((a, b) => (a.batchIndex ?? 0) - (b.batchIndex ?? 0));
+
+  const promoted: Array<{ candidateId: string; questionId: string }> = [];
+  const failed: Array<{ candidateId: string; reason: string }> = [];
+
+  for (const candidate of ordered) {
+    if (candidate.promotedQuestionId) {
+      promoted.push({ candidateId: candidate.id, questionId: candidate.promotedQuestionId });
+      continue;
+    }
+    try {
+      const { questionId } = await promoteCandidate(candidate.id, actorId);
+      promoted.push({ candidateId: candidate.id, questionId });
+    } catch (error) {
+      failed.push({
+        candidateId: candidate.id,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return { promoted, failed };
+}
+
+/**
+ * The batch flow's single commit action (PLAN.md §12.6):
+ * promote the approved set, then add the WHOLE set to a Q Set — either an
+ * existing one or a brand-new one — in one call.
+ */
+export async function commitJobToSet(
+  jobId: string,
+  actorId: string,
+  target: { setId?: string | null; newSet?: {
+    title: string;
+    categoryId: string;
+    mode?: string;
+    difficulty?: string;
+    description?: string | null;
+  } | null },
+): Promise<CommitOutcome> {
+  const job = await getJob(jobId);
+
+  const hasExisting = Boolean(target.setId?.trim());
+  const hasNew = Boolean(target.newSet?.title?.trim());
+  if (hasExisting === hasNew) {
+    throw validationError("Choose exactly one: an existing Q Set, or a new one.");
+  }
+
+  let setId: string;
+  let createdSet: CommitOutcome["createdSet"] = null;
+
+  if (hasNew) {
+    const { createSet } = await import("@/modules/catalog");
+    const set = await createSet(
+      {
+        categoryId: target.newSet!.categoryId,
+        title: target.newSet!.title.trim(),
+        description: target.newSet?.description ?? null,
+        mode: (target.newSet?.mode as never) ?? "practice",
+        difficulty: target.newSet?.difficulty ?? "medium",
+      },
+      actorId,
+    );
+    createdSet = { id: set.id, title: set.title };
+    setId = set.id;
+  } else {
+    setId = target.setId!;
+  }
+
+  const { promoted, failed } = await commitJobCandidates(jobId, actorId);
+
+  // Attach the approved set in batch order. attachQuestions asserts the set
+  // exists and preserves the caller's order.
+  const questionIds = promoted.map((p) => p.questionId);
+  let attached = 0;
+  let attachSkipped = 0;
+  if (questionIds.length > 0) {
+    const { attachQuestions } = await import("@/modules/questions");
+    const result = await attachQuestions(setId, questionIds, actorId);
+    attached = result.added;
+    attachSkipped = result.skipped;
+  }
+
+  await db()
+    .update(aiGenerationJobs)
+    .set({ committedSetId: setId, committedAt: nowMs() })
+    .where(eq(aiGenerationJobs.id, jobId));
+
+  await recordAudit(actorId, "ai.job_committed", "ai_job", jobId, null, {
+    setId,
+    createdSet: createdSet?.id ?? null,
+    promoted: promoted.length,
+    attached,
+    attachSkipped,
+    failed: failed.length,
+  });
+
+  logInfo("ai", `job ${jobId} committed`, {
+    setId,
+    createdSet: createdSet?.id ?? null,
+    promoted: promoted.length,
+    attached,
+    failed: failed.length,
+  });
+
+  return { jobId, promoted, failed, createdSet, newSetId: createdSet?.id ?? null, questionIds };
 }
