@@ -4,7 +4,8 @@ A two-surface quiz platform: a user-facing card grid for browsing and taking qui
 with rich post-answer explanations, and an admin console for authoring content, running
 AI-assisted generation with a human review gate, and triaging duplicates.
 
-**Read [`PLAN.md`](./PLAN.md) first.** It is the contract for this codebase — the frozen
+**Read [`PLAN.md`](./PLAN.md) first.** Every schema change is tracked in
+[`MIGRATIONS.md`](./MIGRATIONS.md). It is the contract for this codebase — the frozen
 design constraints in §2 explain *why* the code is shaped the way it is.
 
 ## Stack
@@ -142,6 +143,8 @@ a managed edge rate limiter in front.
 Non-obvious, and each one has already cost time once:
 
 1. **Migrations are append-only.** Never edit an applied migration. Add a new one.
+   See [`MIGRATIONS.md`](./MIGRATIONS.md) for the full register — every migration,
+   what it did, and how to add the next one.
 2. **`migrations/0001_fts5.sql` is hand-written.** Drizzle cannot model FTS5 virtual
    tables or triggers. It is registered in `migrations/meta/_journal.json` as `idx 1`
    so the next `drizzle-kit generate` emits `0002` instead of colliding.
