@@ -44,6 +44,9 @@
 
   "vars": {
     "APP_ENV": "development",
+    "APP_BASE_URL": "http://localhost:3000",
+    "GOOGLE_CLIENT_ID": "",
+    "ADMIN_EMAILS": "",
     "DEFAULT_GENERATION_MODEL": "anthropic/claude-sonnet-4.5",
     "EMBEDDING_MODEL": "@cf/baai/bge-m3"
   },

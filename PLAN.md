@@ -54,13 +54,20 @@
 | Milestone | Status |
 |---|---|
 | **M0 — Foundation and risk spike** | ✅ **Done and verified** (local). Committed as `6ea6303`. |
-| M1 — Auth and roles | Not started — **blocked on decision D-1** (Workers Paid vs managed auth) |
+| **M1 — Auth and roles** | ✅ **Done and verified** (local). Committed as part of the M1 commit. Google-only login, sessions in D1, admin role gate. The live Google round-trip needs real OAuth credentials. |
 | M2 onward | Not started |
 
 M0 delivered: the full 17-table schema with both migrations, a local D1 workflow
 (generate → migrate → seed → query), the domain module layout, screens 1 and 2
 rendering live D1 data, normalization + SimHash, a `/api/health` probe with real
 database connectivity, and **37 passing tests** that pin the §2 constraints.
+
+**M1 delivered** (plus migration `0002`): Google OIDC authorization-code + PKCE
+flow with state single-use storage, ID-token verification against Google's JWKS
+(via `jose`), D1-backed sessions (sha256-stored tokens, 30-day sliding expiry,
+HttpOnly + SameSite=Lax cookies), bootstrap admin via `ADMIN_EMAILS`, and the
+user/admin role gates. **61 tests passing.** The full live round-trip (real
+Google → callback) still needs OAuth client credentials (D-4 in §24).
 
 Deviations from this document, recorded rather than hidden:
 
@@ -79,10 +86,23 @@ Deviations from this document, recorded rather than hidden:
    `modules/questions.createQuestion()`, which does not exist until M4. The hashes
    are computed exactly as that funnel will compute them, so no migration is needed
    when the funnel lands.
+6. **Auth is direct Google OIDC, not Firebase** (decision D-2 + follow-up). Firebase
+   would still have needed our own `users` table for roles, so it added a vendor
+   without removing a layer. **Consequence: D-1 is moot** — no password hashing
+   means the Workers Free 10 ms CPU cap no longer blocks auth; the app can run on
+   the $0 tier until scale justifies Paid (see §17.9).
+7. **`users` gained Google OIDC columns and an `oauth_states` table** via migration
+   `0002` — `password_hash` stays as a NULLABLE column (future email+password
+   path) rather than being dropped.
+8. **Deep tests use a `setDbForTests` seam instead of `@cloudflare/vitest-pool-workers`.**
+   Services run against a real local D1 without the Workers runtime; `cloudflare:workers`
+   is stubbed in vitest with a throwing proxy so accidental `bindings()` calls in
+   tests fail loudly. Simpler than the pool and exercises the actual migrations.
 
 **Not yet verified: deployment.** No Cloudflare credentials were available in this
 session, so M0's "deploys to a `*.workers.dev` URL" exit test and the remote-D1 FTS5
-check remain **outstanding**. Everything else in M0 passed locally.
+check remain **outstanding**. The M1 Google round-trip also needs real credentials.
+Everything else passed locally.
 
 ---
 
@@ -2673,3 +2693,4 @@ VERDICT  semantic_dup, similarity 0.94, bestMatch #1842, autoReject false
 | 2026-09-14 | Initial plan. Content model frozen at 2 levels (Category → Set) per explicit instruction. Stack fixed on vinext + D1 + Drizzle + shadcn/ui + OpenRouter + Vectorize. Three-layer dedupe funnel specified. Milestones M0–M15 defined. Decisions D-1…D-10 raised. |
 | 2026-09-14 | Added §17.5–17.10: verified deployment cost model. Confirmed against live Cloudflare pricing. Result: **~$5/month at 10 users** and effectively flat to ~1,000 users; real cost is one-time content generation ($4–$103 for a 10,000-question bank), not infrastructure. Identified Workers Free's 10 ms CPU cap as the binding auth blocker and D1's 100k rows/day free write cap as the bulk-import hazard. |
 | 2026-09-14 | Product renamed to **Quiz Master Supreme**. Added §0.1 build status. **M0 implemented and verified locally** — see §0.1. Corrected §3.3 (vinext resolved at `1.0.0-beta.9`, spike passed) and §13.3 (SimHash switched from 3-grams to unigrams; threshold 6 → 16, based on measured distances). Recorded five as-built deviations in §0.1. Outstanding: the deploy half of M0's exit test. |
+| 2026-09-14 | **M1 implemented and verified locally.** Decisions D-1/D-2/D-3 answered: Google-only login (direct OIDC, not Firebase), which makes D-1 (Workers Paid) moot — see §0.1 #6. Added migration `0002` (Google OIDC columns + `oauth_states`). Recorded three further as-built deviations (§0.1 #6–#8), including the `setDbForTests` test seam replacing `@cloudflare/vitest-pool-workers`. Test count 37 → 61. |

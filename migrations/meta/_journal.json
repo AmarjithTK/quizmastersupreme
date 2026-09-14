@@ -15,6 +15,13 @@
       "when": 1789399058356,
       "tag": "0001_fts5",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789399806989,
+      "tag": "0002_tan_satana",
+      "breakpoints": true
     }
   ]
 }

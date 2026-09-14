@@ -48,12 +48,10 @@ export function contentFingerprint(stem: string, optionBodies: readonly string[]
   return [normalizeStem(stem), ...sortedOptions].join("|");
 }
 
-/** sha256 as lowercase hex. Uses WebCrypto, available in Workers and Node 18+. */
-export async function sha256Hex(input: string): Promise<string> {
-  const bytes = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
+/** sha256 as lowercase hex. Re-exported from `lib/crypto` so that `modules/auth`
+ *  can use the same primitive without importing another domain module (§2.4). */
+import { sha256Hex } from "@/lib/crypto";
+export { sha256Hex };
 
 /**
  * The three layer-1 hashes stored on every question.

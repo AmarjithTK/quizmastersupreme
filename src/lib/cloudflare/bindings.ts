@@ -17,7 +17,20 @@
 import { env } from "cloudflare:workers";
 
 /** Exactly the bindings declared in wrangler.jsonc. */
-export type Bindings = Cloudflare.Env;
+export type GeneratedEnv = Cloudflare.Env;
+
+/**
+ * Runtime bindings `wrangler types` cannot see.
+ *
+ * Secrets arrive via `.dev.vars` locally and `wrangler secret put` in
+ * production — never via `vars` (those are readable in the dashboard). They
+ * exist at runtime but not in the generated `Env` type, so they are declared
+ * here and merged.
+ */
+export interface Bindings extends GeneratedEnv {
+  GOOGLE_CLIENT_SECRET: string;
+  SESSION_SECRET: string;
+}
 
 export function bindings(): Bindings {
   // `env` is populated per-request by the Workers runtime. Its generated type

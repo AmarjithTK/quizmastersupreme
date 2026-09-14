@@ -1,5 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { LogOut, ShieldCheck } from "lucide-react";
+import { getCurrentPageUser } from "@/lib/server/get-current-user";
+import { cn } from "@/lib/utils";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -11,7 +14,9 @@ export const metadata: Metadata = {
     "Practice quizzes with rich explanations, timed mock papers and progress that survives closing the browser.",
 };
 
-export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  const user = await getCurrentPageUser();
+
   return (
     <html lang="en">
       <body className="min-h-screen bg-slate-50 text-slate-900 antialiased">
@@ -23,6 +28,63 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
             >
               Quiz Master <span className="text-slate-400">Supreme</span>
             </Link>
+
+            <nav className="flex items-center gap-2">
+              {user ? (
+                <>
+                  {user.role === "admin" && (
+                    <Link
+                      href="/admin"
+                      className={cn(
+                        "inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-slate-600",
+                        "hover:bg-slate-100 hover:text-slate-900",
+                      )}
+                    >
+                      <ShieldCheck className="size-4" />
+                      Admin
+                    </Link>
+                  )}
+                  <Link
+                    href="/account"
+                    className={cn(
+                      "inline-flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm font-medium text-slate-700",
+                      "hover:bg-slate-100",
+                    )}
+                  >
+                    {user.avatarUrl ? (
+                      <img
+                        src={user.avatarUrl}
+                        alt=""
+                        className="size-6 rounded-full"
+                        referrerPolicy="no-referrer"
+                      />
+                    ) : (
+                      <span className="flex size-6 items-center justify-center rounded-full bg-slate-200 text-xs font-semibold text-slate-600">
+                        {user.displayName?.charAt(0)?.toUpperCase() ?? "?"}
+                      </span>
+                    )}
+                    <span className="hidden sm:inline">{user.displayName ?? "Account"}</span>
+                  </Link>
+                  <form action="/api/auth/logout" method="post">
+                    <button
+                      type="submit"
+                      aria-label="Sign out"
+                      className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+                    >
+                      <LogOut className="size-4" />
+                      <span className="hidden md:inline">Sign out</span>
+                    </button>
+                  </form>
+                </>
+              ) : (
+                <Link
+                  href="/login"
+                  className="rounded-lg bg-slate-900 px-3.5 py-1.5 text-sm font-semibold text-white hover:bg-slate-700"
+                >
+                  Sign in
+                </Link>
+              )}
+            </nav>
           </div>
         </header>
 

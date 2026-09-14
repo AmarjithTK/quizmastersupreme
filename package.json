@@ -7,6 +7,7 @@
     "@vinext/cloudflare": "latest",
     "clsx": "^2.1.1",
     "drizzle-orm": "^0.45.2",
+    "jose": "^6.2.12",
     "lucide-react": "^1.45.0",
     "react": "latest",
     "react-dom": "latest",
@@ -17,7 +18,6 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "latest",
-    "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@tailwindcss/postcss": "latest",
     "@types/node": "latest",
     "@types/react": "latest",
