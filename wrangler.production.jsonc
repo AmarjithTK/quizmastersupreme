@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Source config for production deployment. Local `pnpm dev` continues to use
+  // wrangler.jsonc with APP_ENV=development and no Workflow dispatch.
+  "name": "quizmaster-supreme",
+  "main": "vinext/server/fetch-handler",
+  "compatibility_date": "2026-09-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": { "directory": "dist/client", "not_found_handling": "none", "binding": "ASSETS" },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "quizmaster-supreme-db", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
+  ],
+  "r2_buckets": [
+    { "binding": "STORAGE", "bucket_name": "quizmaster-supreme-assets" }
+  ],
+  "services": [
+    { "binding": "GENERATION_ORCHESTRATOR", "service": "quizmaster-generation-workflow" }
+  ],
+  "vars": {
+    "APP_ENV": "production",
+    "APP_BASE_URL": "",
+    "GOOGLE_CLIENT_ID": "",
+    "ADMIN_EMAILS": "amarjith4097@gmail.com",
+    "DEFAULT_GENERATION_MODEL": "deepseek/deepseek-v4.1-flash",
+    "EMBEDDING_MODEL": "@cf/baai/bge-m3"
+  },
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 0.01 }
+  }
+}

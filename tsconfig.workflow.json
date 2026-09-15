@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "incremental": false },
+  "include": ["src/workers/generation-workflow.ts", "worker-workflow-configuration.d.ts"],
+  "exclude": ["node_modules", "dist", ".vinext", ".tooling", "worker-configuration.d.ts"]
+}

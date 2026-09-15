@@ -3,11 +3,30 @@ import { logInfo } from "@/lib/logger";
 import { bindings } from "@/lib/cloudflare/bindings";
 import { requireAdmin } from "@/modules/auth";
 import { createGenerationJob, listJobs, openRouterKeyConfigured } from "@/modules/ai";
+import { dispatchGenerationWorkflow } from "@/modules/ai/orchestration";
 import {
   getAiGenerationSettings,
   getGenerationSettings,
   getProviderRouting,
 } from "@/modules/settings";
+import { z } from "zod";
+import { validationError } from "@/lib/errors";
+
+const CreateJobSchema = z.object({
+  topic: z.string().min(1).max(240),
+  brief: z.string().min(1).max(8_000),
+  requestedCount: z.number().int().min(1),
+  batchSize: z.number().int().min(5).max(50).nullable().optional(),
+  groundingMode: z.enum(["off", "single"]).nullable().optional(),
+  difficulty: z.string().max(40).nullable().optional(),
+  subtopics: z.array(z.string().min(1).max(240)).max(40).nullable().optional(),
+  avoidTopics: z.array(z.string().min(1).max(240)).max(40).nullable().optional(),
+  model: z.string().max(240).optional(),
+  target: z.string().max(1_000).nullable().optional(),
+  sources: z.string().max(20_000).nullable().optional(),
+  targetCategoryId: z.string().max(100).nullable().optional(),
+  targetSetId: z.string().max(100).nullable().optional(),
+}).strict();
 
 /**
  * /api/admin/generation-jobs
@@ -40,13 +59,15 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const actor = await requireAdmin(request);
-    const body = (await request.json()) as Record<string, unknown>;
+    const parsed = CreateJobSchema.safeParse(await request.json());
+    if (!parsed.success) throw validationError(parsed.error.issues[0]?.message ?? "Invalid generation request.");
+    const body = parsed.data;
 
     // Model: explicit per-job override wins, else the admin-stored default,
     // else the baked-in default (PLAN.md §12 / settings).
     const aiSettings = await getAiGenerationSettings();
     const model =
-      typeof body.model === "string" && body.model.trim()
+      body.model?.trim()
         ? body.model.trim()
         : aiSettings.model;
 
@@ -57,30 +78,25 @@ export async function POST(request: Request) {
 
     const job = await createGenerationJob(
       {
-        topic: typeof body.topic === "string" ? body.topic : "",
-        brief: typeof body.brief === "string" ? body.brief : "",
-        requestedCount: typeof body.requestedCount === "number" ? body.requestedCount : 25,
+        topic: body.topic,
+        brief: body.brief,
+        requestedCount: body.requestedCount,
         // Per-job batch size; falls back to the admin default in createGenerationJob.
-        batchSize: typeof body.batchSize === "number" ? body.batchSize : null,
+        batchSize: body.batchSize ?? null,
         // Per-job grounding override; null = use the global setting.
         groundingMode:
-          body.groundingMode === "off" || body.groundingMode === "single"
-            ? body.groundingMode
-            : null,
-        difficulty: typeof body.difficulty === "string" ? body.difficulty : null,
-        subtopics: Array.isArray(body.subtopics)
-          ? body.subtopics.filter((s): s is string => typeof s === "string")
-          : null,
-        avoidTopics: Array.isArray(body.avoidTopics)
-          ? body.avoidTopics.filter((s): s is string => typeof s === "string")
-          : null,
+          body.groundingMode ?? null,
+        difficulty: body.difficulty ?? null,
+        subtopics: body.subtopics ?? null,
+        avoidTopics: body.avoidTopics ?? null,
         model,
-        target: typeof body.target === "string" ? body.target : null,
-        sources: typeof body.sources === "string" ? body.sources : null,
+        target: body.target ?? null,
+        sources: body.sources ?? null,
         providerOnly: routing.only.length > 0 ? routing.only : null,
         providerOrder: routing.order.length > 0 ? routing.order : null,
-        targetCategoryId: typeof body.targetCategoryId === "string" ? body.targetCategoryId : null,
-        targetSetId: typeof body.targetSetId === "string" ? body.targetSetId : null,
+        targetCategoryId: body.targetCategoryId ?? null,
+        targetSetId: body.targetSetId ?? null,
+        planningEnabled: true,
       },
       actor.id,
     );
@@ -94,7 +110,12 @@ export async function POST(request: Request) {
       hasTarget: Boolean(job.target),
       hasSources: Boolean(job.sources),
     });
-    return jsonResponse({ job }, { status: 201 });
+    const scheduled = await dispatchGenerationWorkflow("start", job.id);
+    return jsonResponse({
+      job,
+      orchestration: scheduled ? "workflow" : "manual",
+      ...(scheduled ? {} : { orchestrationWarning: "Automatic scheduling is unavailable; use the browser's recoverable manual loop." }),
+    }, { status: 201 });
   } catch (error) {
     return errorResponse(error);
   }

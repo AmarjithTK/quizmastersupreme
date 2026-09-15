@@ -1,5 +1,15 @@
 # PIPELINE-PLAN — Quiz Master generation pipeline
 
+> **As-built update (2026-09-15):** This describes the earlier batch pipeline.
+> [`plan1.md`](./plan1.md) is authoritative for new plan-first jobs. The current
+> implementation adds approved segment and question-type quotas, cited source
+> packs, explicit policy rejections, immutable batch directives, and D1 leases.
+> Planned web grounding uses OpenRouter's server-side `openrouter:web_search`
+> tool; the deprecated `web` plugin is retained only for legacy unplanned jobs.
+> Browser-driven steps are recoverable; a separate Workflow Worker is now
+> wired for automatic production continuation when its resources and shared
+> secret are deployed. That live round-trip is not yet verified.
+
 **Status:** **ALL PHASES SHIPPED** — P0 (loop), P1 (review UX), P2 (grounding),
 P3 (telemetry/docs). Migrations `0007` + `0008`, 289 tests green. Decisions resolved (§13).
 Supersedes the "one big call" assumption in `REVAMP-PLAN.md` §3; builds on what already

@@ -5,7 +5,7 @@
   // real database_id after `wrangler d1 create quizmaster-supreme-db-staging`.
   // Deploy with: pnpm deploy:staging (requires `wrangler login`).
   "name": "quizmaster-supreme-staging",
-  "compatibility_date": "2026-09-14",
+  "compatibility_date": "2026-09-15",
   "compatibility_flags": ["nodejs_compat"],
   "main": "vinext/server/fetch-handler",
   "assets": {
@@ -31,15 +31,18 @@
   // diagnosed weeks later. Locally simulated by Wrangler, so this works under
   // `vinext dev` with nothing provisioned.
   "r2_buckets": [
-    { "binding": "STORAGE", "bucket_name": "quizmaster-supreme-assets" }
+    { "binding": "STORAGE", "bucket_name": "quizmaster-supreme-assets-staging" }
   ],
 
-  // NOTE: deliberately NO Queue binding here. vinext owns the Worker entry
+  "services": [
+    { "binding": "GENERATION_ORCHESTRATOR", "service": "quizmaster-generation-workflow-staging" }
+  ],
+
+  // NOTE: deliberately NO Queue/Workflow export here. vinext owns the Worker entry
   // point (`vinext/server/fetch-handler` re-exports a virtual entry), so there
   // is nowhere to attach a `queue()` handler without replacing that entry.
-  // Generation is therefore advanced in two bounded steps driven by the admin
-  // UI — see modules/ai/pipeline.ts. `runGenerationStep` is exactly what a
-  // queue consumer would call if the entry is ever customised.
+  // point; the separate generation Worker imports the same domain services.
+  // The admin UI drives bounded steps only in local/manual fallback mode.
   //
   // M12 — semantic dedupe (needs a Vectorize index and the Workers AI binding):
   // "vectorize": [{ "binding": "VECTORIZE", "index_name": "quizmaster-supreme-questions" }],
@@ -54,5 +57,9 @@
     "EMBEDDING_MODEL": "@cf/baai/bge-m3"
   },
 
-  "observability": { "enabled": true }
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 0.01 }
+  }
 }

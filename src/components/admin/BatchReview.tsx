@@ -35,6 +35,14 @@ type Batch = {
   produced: number;
   accepted: number;
   flagged: number;
+  rawItemCount: number;
+  modelShortfallCount: number;
+  schemaInvalidCount: number;
+  contentInvalidCount: number;
+  policyRejectedCount: number;
+  duplicateFlaggedCount: number;
+  finishReason: string | null;
+  parseRepair: string | null;
   promptTokens: number | null;
   completionTokens: number | null;
   costUsd: number | null;
@@ -61,6 +69,11 @@ type Candidate = {
   dedupeMatchedStem: string | null;
   dedupeSimilarity: number | null;
   dedupeReason: string | null;
+  segmentId: string | null;
+  entityKey: string | null;
+  questionType: string | null;
+  rejectionKind: string | null;
+  rejectionReason: string | null;
 };
 
 type SetOption = { id: string; title: string; status: string; categoryTitle?: string };
@@ -72,10 +85,16 @@ type JobDetail = {
     topic: string;
     model: string;
     status: string;
+    phase: string | null;
     requestedCount: number;
     acceptedCount: number;
     producedCount: number;
     duplicateCount: number;
+    rawItemCount: number;
+    modelShortfallCount: number;
+    schemaInvalidCount: number;
+    contentInvalidCount: number;
+    policyRejectedCount: number;
     batchSize: number;
     maxCalls: number;
     backfillRound: number;
@@ -84,6 +103,8 @@ type JobDetail = {
   };
   candidates: Candidate[];
   batches: Batch[];
+  rejections: Array<{ id: string; batchNo: number; stage: string; code: string; reasonsJson: string }>;
+  segments: Array<{ id: string; key: string; label: string; targetCount: number; acceptedCount: number; rejectedCount: number; invalidCount: number; sourceFactCount: number; status: string }>;
 };
 
 type CommitOutcome = {
@@ -141,7 +162,7 @@ export function BatchReview({
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   /** Which accepted questions will be added (the reviewer's explicit choice). */
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const selectionSignature = useRef<string>("");
+  const knownEligible = useRef<Set<string>>(new Set());
   const [regenerating, setRegenerating] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -172,13 +193,19 @@ export function BatchReview({
       const acceptedIds = body.candidates
         .filter((candidate) => candidate.rejected !== 1)
         .map((candidate) => candidate.id);
-      const signature = acceptedIds.join("|");
-      if (signature !== selectionSignature.current) {
-        selectionSignature.current = signature;
-        setSelected(
-          new Set(acceptedIds.slice(0, Math.max(1, body.job.requestedCount))),
-        );
-      }
+      const eligible = new Set(acceptedIds);
+      const newIds = acceptedIds.filter((id) => !knownEligible.current.has(id));
+      setSelected((current) => {
+        const next = new Set([...current].filter((id) => eligible.has(id)));
+        let remaining = Math.max(0, body.job.requestedCount - next.size);
+        for (const id of newIds) {
+          if (remaining <= 0) break;
+          next.add(id);
+          remaining--;
+        }
+        return next;
+      });
+      knownEligible.current = eligible;
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : "Could not load the generated questions.");
     }
@@ -210,6 +237,7 @@ export function BatchReview({
   const kept = candidates.filter((c) => c.rejected !== 1);
   const flagged = candidates.filter((c) => c.dedupeStatus !== "clean");
   const alreadyCommitted = detail.job.committedAt != null;
+  const terminal = ["succeeded", "partial", "cancelled"].includes(detail.job.status);
 
   // Candidates grouped by the internal call that produced them.
   const byBatch = new Map<number, Candidate[]>();
@@ -219,6 +247,7 @@ export function BatchReview({
     if (list) list.push(candidate);
     else byBatch.set(key, [candidate]);
   }
+  for (const batch of detail.batches) if (!byBatch.has(batch.batchNo)) byBatch.set(batch.batchNo, []);
   const grouped = [...byBatch.entries()].sort((a, b) => a[0] - b[0]);
   const batchMeta = new Map(detail.batches.map((batch) => [batch.batchNo, batch]));
 
@@ -359,7 +388,7 @@ export function BatchReview({
   function batchHeader(batchNo: number, group: Candidate[]) {
     const meta = batchMeta.get(batchNo);
     const canRegenerate =
-      !alreadyCommitted && meta != null && meta.status !== "superseded" && meta.status !== "running";
+      terminal && !alreadyCommitted && meta != null && meta.status !== "superseded" && meta.status !== "running";
 
     return (
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
@@ -381,6 +410,22 @@ export function BatchReview({
           <span className="rounded bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">
             superseded
           </span>
+        )}
+        {meta && (
+          <details className="w-full text-[11px] text-slate-600">
+            <summary className="cursor-pointer font-semibold">Why {meta.asked} became {meta.accepted}</summary>
+            <div className="mt-2 grid grid-cols-2 gap-1 sm:grid-cols-4 lg:grid-cols-8">
+              <span>asked <strong>{meta.asked}</strong></span>
+              <span>raw <strong>{meta.rawItemCount}</strong></span>
+              <span>shortfall <strong>{meta.modelShortfallCount}</strong></span>
+              <span>schema invalid <strong>{meta.schemaInvalidCount}</strong></span>
+              <span>content invalid <strong>{meta.contentInvalidCount}</strong></span>
+              <span>policy rejected <strong>{meta.policyRejectedCount}</strong></span>
+              <span>duplicates <strong>{meta.duplicateFlaggedCount}</strong></span>
+              <span>clean <strong>{meta.accepted}</strong></span>
+            </div>
+            {(meta.finishReason || meta.parseRepair) && <p className="mt-1 text-slate-400">finish: {meta.finishReason ?? "unknown"} · parse: {meta.parseRepair ?? "none"}</p>}
+          </details>
         )}
         {canRegenerate && (
           <button
@@ -438,6 +483,41 @@ export function BatchReview({
           </span>
         </div>
       </header>
+
+      <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4 lg:grid-cols-8">
+        <span className="rounded bg-slate-50 p-2">target <strong>{detail.job.requestedCount}</strong></span>
+        <span className="rounded bg-slate-50 p-2">raw <strong>{detail.job.rawItemCount}</strong></span>
+        <span className="rounded bg-slate-50 p-2">shortfall <strong>{detail.job.modelShortfallCount}</strong></span>
+        <span className="rounded bg-slate-50 p-2">schema invalid <strong>{detail.job.schemaInvalidCount}</strong></span>
+        <span className="rounded bg-slate-50 p-2">content invalid <strong>{detail.job.contentInvalidCount}</strong></span>
+        <span className="rounded bg-slate-50 p-2">policy rejected <strong>{detail.job.policyRejectedCount}</strong></span>
+        <span className="rounded bg-slate-50 p-2">duplicates <strong>{detail.job.duplicateCount}</strong></span>
+        <span className="rounded bg-emerald-50 p-2 text-emerald-800">clean <strong>{detail.job.acceptedCount}</strong></span>
+      </div>
+
+      {!terminal && candidates.length > 0 && (
+        <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
+          Review can continue while cards arrive. Adding to a Q Set becomes available when generation stops.
+        </div>
+      )}
+
+      {detail.segments.length > 0 && (
+        <div className="rounded-xl border border-violet-100 bg-violet-50/30 p-3">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-violet-700">Coverage ledger</h3>
+          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+            {detail.segments.map((segment) => {
+              const percent = Math.min(100, Math.round((segment.acceptedCount / Math.max(1, segment.targetCount)) * 100));
+              return (
+                <div key={segment.id} className="rounded-lg border border-violet-100 bg-white p-2 text-xs">
+                  <div className="flex justify-between gap-2"><strong>{segment.label}</strong><span>{segment.acceptedCount}/{segment.targetCount}</span></div>
+                  <div className="mt-1 h-1.5 overflow-hidden rounded bg-slate-100"><div className="h-full bg-violet-500" style={{ width: `${percent}%` }} /></div>
+                  <p className="mt-1 text-[10px] text-slate-400">{segment.sourceFactCount} source facts · {segment.rejectedCount} rejected · {segment.invalidCount} invalid · {segment.status.replaceAll("_", " ")}</p>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {flagged.length > 0 && (
         <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
@@ -547,6 +627,11 @@ export function BatchReview({
                       {badge.label} · rejected by default
                     </span>
                   )}
+                  {candidate.rejectionKind === "policy" && (
+                    <span className="rounded border border-violet-300 bg-violet-50 px-1.5 py-0.5 font-semibold text-violet-700">Policy rejected</span>
+                  )}
+                  {candidate.segmentId && <span className="rounded bg-violet-50 px-1.5 py-0.5 text-violet-700">{candidate.segmentId}</span>}
+                  {candidate.entityKey && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-slate-600">entity: {candidate.entityKey}</span>}
                   {isFlagged && !isRejected && (
                     <span className="rounded border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">
                       accepted by you
@@ -589,6 +674,11 @@ export function BatchReview({
                         then becomes eligible to add to a Q Set.
                       </p>
                     )}
+                  </div>
+                )}
+                {candidate.rejectionKind === "policy" && candidate.rejectionReason && (
+                  <div className="rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-900">
+                    <strong>Coverage policy:</strong> {candidate.rejectionReason}
                   </div>
                 )}
 
@@ -673,7 +763,9 @@ export function BatchReview({
               }
               className="rounded border border-emerald-300 bg-white px-2 py-0.5 font-semibold text-emerald-800 hover:bg-emerald-50"
             >
-              Exactly the target ({detail.job.requestedCount})
+              {kept.length >= detail.job.requestedCount
+                ? `Select first ${detail.job.requestedCount} by plan order`
+                : `Select all ${kept.length} available`}
             </button>
             <button
               type="button"
@@ -756,7 +848,7 @@ export function BatchReview({
           </div>
         </div>
       ) : (
-        kept.length > 0 && (
+        terminal && kept.length > 0 && (
           <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
             <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
               <Save className="size-4" />

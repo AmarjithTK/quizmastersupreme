@@ -32,6 +32,8 @@ export interface Bindings extends GeneratedEnv {
   SESSION_SECRET: string;
   /** OpenRouter key for AI question generation (M10). */
   OPENROUTER_API_KEY: string;
+  /** Shared secret for the private service-bound generation Workflow Worker. */
+  GENERATION_ORCHESTRATION_TOKEN?: string;
 }
 
 export function bindings(): Bindings {

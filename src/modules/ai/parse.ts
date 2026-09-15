@@ -27,6 +27,13 @@ export type ParsedCandidate = {
   index: number;
   draft: QuestionDraft;
   raw: unknown;
+  metadata: {
+    segmentId: string | null;
+    entityKey: string | null;
+    factKey: string | null;
+    questionType: string | null;
+    sourceIds: string[];
+  };
 };
 
 export type RejectedCandidate = {
@@ -40,6 +47,8 @@ export type ParseResult = {
   rejected: RejectedCandidate[];
   notes: string | null;
   repair: ParseRepair;
+  /** Every entry recovered from the model's array, valid or otherwise. */
+  rawItemCount: number;
 };
 
 export class GenerationParseError extends Error {
@@ -202,11 +211,22 @@ export function parseGenerationResponse(text: string, fallbackTopic = ""): Parse
   for (const [index, raw] of questions.entries()) {
     const result = GeneratedQuestionSchema.safeParse(raw);
     if (result.success) {
-      accepted.push({ index, draft: toDraft(result.data, fallbackTopic), raw });
+      accepted.push({
+        index,
+        draft: toDraft(result.data, fallbackTopic),
+        raw,
+        metadata: {
+          segmentId: result.data.segment_id ?? null,
+          entityKey: result.data.entity_key ?? null,
+          factKey: result.data.fact_key ?? null,
+          questionType: result.data.question_type ?? null,
+          sourceIds: result.data.source_ids ?? [],
+        },
+      });
     } else {
       rejected.push({ index, errors: describeIssues(result.error), raw });
     }
   }
 
-  return { accepted, rejected, notes, repair };
+  return { accepted, rejected, notes, repair, rawItemCount: questions.length };
 }

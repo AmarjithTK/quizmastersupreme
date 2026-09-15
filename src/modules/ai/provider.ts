@@ -16,6 +16,12 @@ export type GenerationRequest = {
   user: string;
   temperature?: number;
   maxTokens?: number;
+  /** Strict provider-side JSON Schema when the selected route supports it. */
+  responseSchema?: {
+    name: string;
+    schema: Record<string, unknown>;
+    strict?: boolean;
+  };
   /**
    * OpenRouter provider routing (provider.only / provider.order).
    * `only` is the allow-list of provider slugs; `order` is their priority.
@@ -29,6 +35,8 @@ export type GenerationRequest = {
    * happens once per job into a shared source pool (PIPELINE-PLAN.md §8).
    */
   plugins?: Array<Record<string, unknown>>;
+  /** OpenRouter server tools, including the current web-search tool. */
+  tools?: Array<Record<string, unknown>>;
 };
 
 /** One grounded source, as OpenRouter standardises it into `url_citation`. */
@@ -44,6 +52,8 @@ export type GenerationResponse = {
   model: string;
   promptTokens: number | null;
   completionTokens: number | null;
+  /** Provider termination reason (`stop`, `length`, …), when supplied. */
+  finishReason?: string | null;
   /** Web-search citations, when the request used the `web` plugin. */
   citations?: UrlCitation[];
   /** The provider's own payload, for R2 archival and debugging. */
@@ -74,6 +84,30 @@ export class LlmError extends Error {
 }
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+const MAX_PROVIDER_BODY_BYTES = 2_000_000;
+
+async function boundedProviderBody(response: Response): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (size < MAX_PROVIDER_BODY_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const available = Math.min(value.byteLength, MAX_PROVIDER_BODY_BYTES - size);
+      chunks.push(value.subarray(0, available));
+      size += available;
+      if (available < value.byteLength) break;
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  const joined = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength; }
+  return new TextDecoder().decode(joined);
+}
 
 /**
  * Fallback output budget when a caller does not supply one. The pipeline always
@@ -87,13 +121,40 @@ export const DEFAULT_MAX_TOKENS = 16_000;
 // pipeline has always imported it from the provider.
 export { estimateCostUsd, estimateJobCostUsd, priceFor } from "@/lib/pricing";
 
+/**
+ * Hard cap on a single provider round-trip. A stalled upstream (or a provider
+ * that silently queues a routing request indefinitely) must fail the job with a
+ * readable error instead of hanging the request and every UI waiting on it
+ * (the step lease only releases when the fetch returns).
+ *
+ * Generous on purpose: a grounded generation call can legitimately run minutes
+ * (web-search iterations plus up to 8k output tokens), so the cap bounds the
+ * pathological case without breaking real work.
+ */
+export const DEFAULT_PROVIDER_TIMEOUT_MS = 600_000;
+
+/** OpenRouter error bodies are `{"error: {message, code, ...}}` when possible. */
+function providerErrorMessage(bodyText: string): string | null {
+  try {
+    const parsed = JSON.parse(bodyText) as { error?: { message?: unknown } };
+    const message = parsed.error?.message;
+    if (typeof message === "string" && message.trim()) return message.trim().slice(0, 300);
+  } catch {
+    // Not JSON — fall through and leave the snippet to the log only.
+  }
+  return null;
+}
+
 export function openRouterProvider(options: {
   apiKey: string;
   referer?: string;
   title?: string;
   fetchImpl?: typeof fetch;
+  /** Override the per-request cap (see DEFAULT_PROVIDER_TIMEOUT_MS). */
+  timeoutMs?: number;
 }): LlmProvider {
   const doFetch = options.fetchImpl ?? fetch;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS;
 
   return {
     name: "openrouter",
@@ -119,34 +180,66 @@ export function openRouterProvider(options: {
               ...(request.providerOrder && request.providerOrder.length > 0
                 ? { order: request.providerOrder }
                 : {}),
+              ...(request.responseSchema ? { require_parameters: true } : {}),
             }
-          : undefined;
+          : request.responseSchema
+            ? { require_parameters: true }
+            : undefined;
 
-      const response = await doFetch(OPENROUTER_URL, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${options.apiKey}`,
-          "content-type": "application/json",
-          ...(options.referer ? { "HTTP-Referer": options.referer } : {}),
-          ...(options.title ? { "X-Title": options.title } : {}),
-        },
-        body: JSON.stringify({
-          model: request.model,
-          messages: [
-            { role: "system", content: request.system },
-            { role: "user", content: request.user },
-          ],
-          temperature: request.temperature ?? 0.7,
-          max_tokens: request.maxTokens ?? DEFAULT_MAX_TOKENS,
-          // Ask for JSON where the model supports it; the parser copes when it
-          // does not, so this is an optimisation rather than a requirement.
-          response_format: { type: "json_object" },
-          ...(providerRouting ? { provider: providerRouting } : {}),
-          ...(request.plugins && request.plugins.length > 0 ? { plugins: request.plugins } : {}),
-        }),
-      });
+      const responseFormat = request.responseSchema
+        ? {
+            type: "json_schema",
+            json_schema: {
+              name: request.responseSchema.name,
+              strict: request.responseSchema.strict ?? true,
+              schema: request.responseSchema.schema,
+            },
+          }
+        : { type: "json_object" };
 
-      const bodyText = await response.text();
+      let response: Response;
+      try {
+        response = await doFetch(OPENROUTER_URL, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${options.apiKey}`,
+            "content-type": "application/json",
+            ...(options.referer ? { "HTTP-Referer": options.referer } : {}),
+            ...(options.title ? { "X-Title": options.title } : {}),
+          },
+          body: JSON.stringify({
+            model: request.model,
+            messages: [
+              { role: "system", content: request.system },
+              { role: "user", content: request.user },
+            ],
+            temperature: request.temperature ?? 0.7,
+            max_tokens: request.maxTokens ?? DEFAULT_MAX_TOKENS,
+            // Ask for JSON where the model supports it; the parser copes when it
+            // does not, so this is an optimisation rather than a requirement.
+            response_format: responseFormat,
+            ...(providerRouting ? { provider: providerRouting } : {}),
+            ...(request.plugins && request.plugins.length > 0 ? { plugins: request.plugins } : {}),
+            ...(request.tools && request.tools.length > 0 ? { tools: request.tools } : {}),
+          }),
+          // No streaming and no retry loop above us: a dead upstream would
+          // otherwise pin the request (and the job's step lease) forever.
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+      } catch (error) {
+        if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+          logError("provider", `provider request timed out after ${Math.round(timeoutMs / 1000)}s`, {
+            model: request.model,
+          });
+          throw new LlmError(
+            `The model provider did not respond within ${Math.round(timeoutMs / 1000)}s.`,
+            { code: "PROVIDER_TIMEOUT", retryable: false },
+          );
+        }
+        throw error;
+      }
+
+      const bodyText = await boundedProviderBody(response);
 
       if (!response.ok) {
         // 429 and 5xx are worth retrying; 4xx generally are not.
@@ -155,11 +248,17 @@ export function openRouterProvider(options: {
           retryable,
           bodySnippet: bodyText.slice(0, 500),
         });
-        throw new LlmError(`The model provider returned ${response.status}.`, {
-          code: response.status === 429 ? "RATE_LIMITED" : "PROVIDER_ERROR",
-          status: response.status,
-          retryable,
-        });
+        // Carry the provider's own explanation into the job error / UI: the
+        // generic status alone ("returned 400") explains nothing.
+        const providerMessage = providerErrorMessage(bodyText);
+        throw new LlmError(
+          `The model provider returned ${response.status}.${providerMessage ? ` Provider message: ${providerMessage}` : ""}`,
+          {
+            code: response.status === 429 ? "RATE_LIMITED" : "PROVIDER_ERROR",
+            status: response.status,
+            retryable,
+          },
+        );
       }
 
       logInfo("provider", `HTTP ${response.status} received`, {
@@ -181,6 +280,7 @@ export function openRouterProvider(options: {
       const payload = parsed as {
         model?: string;
         choices?: Array<{
+          finish_reason?: string;
           message?: {
             content?: string;
             annotations?: Array<{
@@ -219,6 +319,7 @@ export function openRouterProvider(options: {
         model: payload.model ?? request.model,
         promptTokens: payload.usage?.prompt_tokens ?? null,
         completionTokens: payload.usage?.completion_tokens ?? null,
+        finishReason: payload.choices?.[0]?.finish_reason ?? null,
         contentChars: text.length,
         grounded: request.plugins?.length ? true : undefined,
         citations: citations.length || undefined,
@@ -229,6 +330,7 @@ export function openRouterProvider(options: {
         model: payload.model ?? request.model,
         promptTokens: payload.usage?.prompt_tokens ?? null,
         completionTokens: payload.usage?.completion_tokens ?? null,
+        finishReason: payload.choices?.[0]?.finish_reason ?? null,
         citations,
         raw: parsed,
       };
@@ -256,6 +358,7 @@ export function stubProvider(
         model: request.model,
         promptTokens: Math.ceil((request.system.length + request.user.length) / 4),
         completionTokens: Math.ceil(text.length / 4),
+        finishReason: "stop",
         raw: { stub: true },
       };
     },

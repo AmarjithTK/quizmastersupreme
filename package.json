@@ -39,9 +39,11 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "wrangler dev --config dist/server/wrangler.json",
-    "deploy": "vinext-cloudflare deploy --config dist/server/wrangler.json",
+    "deploy": "vinext-cloudflare deploy --config wrangler.production.jsonc",
     "typecheck": "tsc --noEmit",
+    "typecheck:workflow": "tsc --noEmit -p tsconfig.workflow.json",
     "test": "vitest run",
+    "test:unit": "vitest run --config vitest.unit.config.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate:local": "wrangler d1 migrations apply quizmaster-supreme-db --local",
     "db:migrate:remote": "wrangler d1 migrations apply quizmaster-supreme-db --remote",
@@ -51,6 +53,8 @@
     "dev:admin-token": "tsx scripts/dev-admin-token.ts",
     "backup": "tsx scripts/backup.ts",
     "restore": "tsx scripts/restore.ts",
-    "deploy:staging": "vinext-cloudflare deploy --config wrangler.staging.jsonc"
+    "deploy:staging": "vinext-cloudflare deploy --config wrangler.staging.jsonc",
+    "workflow:dry-run": "wrangler deploy --dry-run --config wrangler.workflow.jsonc",
+    "workflow:dry-run:staging": "wrangler deploy --dry-run --config wrangler.workflow.staging.jsonc"
   }
 }

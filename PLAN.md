@@ -1,5 +1,13 @@
 # Quiz Master Supreme — Master Build Plan
 
+> **Generation addendum (2026-09-15):** [`plan1.md`](./plan1.md) supersedes the
+> generation-specific sections below and the earlier [`PIPELINE-PLAN.md`](./PIPELINE-PLAN.md)
+> wherever they conflict. New admin jobs require a persisted, approved coverage
+> blueprint before the leased batch loop; D1 records directives, source facts, and
+> every rejection. A separate Workflow Worker has been packaged for production
+> continuation, but the live resource/secret/deployment round-trip is not yet
+> verified.
+
 > **Status:** Draft v1 — awaiting sign-off on the Open Questions in §24
 > **Date:** 2026-09-14
 > **Product:** Quiz Master Supreme — a two-surface (user + admin) quiz platform with AI-assisted content generation

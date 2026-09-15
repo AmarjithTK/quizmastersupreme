@@ -16,6 +16,7 @@ import { AlertCircle, Flag, Loader2, Play, Sparkles } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { BatchReview } from "@/components/admin/BatchReview";
+import { GenerationPlanPreview } from "@/components/admin/GenerationPlanPreview";
 import { estimateJobCostUsd } from "@/lib/pricing";
 import { LocalTime } from "@/components/ui/LocalTime";
 
@@ -24,11 +25,16 @@ type Job = {
   topic: string;
   model: string;
   status: string;
+  phase: string | null;
   requestedCount: number;
   acceptedCount: number;
   producedCount: number;
   validCount: number;
   duplicateCount: number;
+  rawItemCount: number;
+  schemaInvalidCount: number;
+  contentInvalidCount: number;
+  policyRejectedCount: number;
   batchSize: number;
   maxCalls: number;
   backfillRound: number;
@@ -45,6 +51,7 @@ type Job = {
 type Progress = {
   jobId: string;
   status: string;
+  phase: string | null;
   /** The target: clean questions the job is driving for. */
   requestedCount: number;
   /** Clean questions accepted so far. */
@@ -52,6 +59,11 @@ type Progress = {
   producedCount: number;
   validCount: number;
   duplicateCount: number;
+  rawItemCount: number;
+  modelShortfallCount: number;
+  schemaInvalidCount: number;
+  contentInvalidCount: number;
+  policyRejectedCount: number;
   /** Calls made so far. */
   round: number;
   /** Planned calls at the current batch size. */
@@ -66,6 +78,26 @@ type Progress = {
 
 const field =
   "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-900/10";
+
+/**
+ * Bounded fetch for the run loops below. A generation step legitimately takes
+ * minutes (the server permits up to 600s per provider call), so the cap just
+ * guarantees the UI can never spin indefinitely on a dead request.
+ */
+async function fetchWithTimeout(input: string, init: RequestInit = {}, ms = 660_000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error(`The server did not respond within ${Math.round(ms / 1000)}s. The job is safe to resume later.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 const STATUS_TONE: Record<string, string> = {
   queued: "bg-slate-100 text-slate-600",
@@ -141,7 +173,7 @@ export function GenerationPanel({
     });
   }
 
-  async function createAndRun() {
+  async function createAndPlan() {
     setError(null);
     setProgress(null);
 
@@ -167,7 +199,7 @@ export function GenerationPanel({
           targetCategoryId: categoryId || null,
         }),
       });
-      const created = (await createRes.json()) as { job?: Job; error?: { message: string } };
+      const created = (await createRes.json()) as { job?: Job; orchestration?: "workflow" | "manual"; error?: { message: string } };
       if (!createRes.ok || !created.job) {
         throw new Error(created.error?.message ?? "Could not create the job.");
       }
@@ -176,24 +208,15 @@ export function GenerationPanel({
       setRunningJobId(jobId);
       setBatchJobId(jobId);
       await refetch();
-      // Open the review immediately, then keep it in view as it fills up.
-      scrollToBatch();
-
-      // Advance until the job says it is done. Each call is ONE internal batch,
-      // so a 300-question job at 25/call needs up to ~12-16 calls; the job's own
-      // max_calls terminates the loop, this bound is just a browser-side backstop.
-      for (let step = 0; step < 60; step++) {
-        const res = await fetch(`/api/admin/generation-jobs/${jobId}/step`, { method: "POST" });
-        const body = (await res.json()) as { progress?: Progress; error?: { message: string } };
-        if (!res.ok || !body.progress) {
-          throw new Error(body.error?.message ?? "The generation step failed.");
-        }
-        setProgress(body.progress);
-        await refetch();
-        // Hand the fresh questions to the review screen right away.
-        setBatchRefresh((n) => n + 1);
-        if (body.progress.done) break;
+      if (created.orchestration === "workflow") {
+        await pollWorkflow(jobId, true);
+      } else {
+        const planRes = await fetchWithTimeout(`/api/admin/generation-jobs/${jobId}/plan`, { method: "POST" });
+        const planBody = await planRes.json() as { error?: { message: string } };
+        if (!planRes.ok) throw new Error(planBody.error?.message ?? "Could not build the generation plan.");
       }
+      await refetch();
+      setBatchRefresh((n) => n + 1);
 
       setTopic("");
       setBrief("");
@@ -375,15 +398,15 @@ export function GenerationPanel({
         <div className="flex flex-wrap items-center gap-3">
           <button
             type="button"
-            onClick={() => void createAndRun()}
+            onClick={() => void createAndPlan()}
             disabled={running || !configured}
             className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-700 disabled:opacity-50"
           >
             {running ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-            {running ? "Generating…" : "Generate"}
+            {running ? "Building plan…" : "Build generation plan"}
           </button>
           <span className="text-xs text-slate-500">
-            Small batches, filtered after every one and refilled until the target is met.
+            Review and approve the coverage plan, then small batches refill until the target is met.
             Duplicates are shown as rejected by default — never hidden. Max {maxRequested} per job.
             Web grounding (if on) runs once per job and is reused by every batch.
           </span>
@@ -391,7 +414,7 @@ export function GenerationPanel({
 
         {running && (
           <p className="text-xs text-slate-500">
-            Running. You can close this tab — the job is saved and can be resumed.
+            Working. The job state and completed calls are durable and can be resumed.
           </p>
         )}
       </section>
@@ -436,6 +459,11 @@ export function GenerationPanel({
           automatically and refreshed after every round. */}
       {batchJobId && (
         <div id="batch-review" className="scroll-mt-4">
+          <GenerationPlanPreview
+            jobId={batchJobId}
+            refreshKey={batchRefresh}
+            onApproved={(mode) => void createAndRunFrom(batchJobId, mode)}
+          />
           <BatchReview
             key={batchJobId}
             jobId={batchJobId}
@@ -470,7 +498,7 @@ export function GenerationPanel({
                 </span>
                 <span className="text-sm font-medium text-slate-900">{job.topic}</span>
                 <span className="text-xs text-slate-500">
-                  target {job.requestedCount} · accepted {job.acceptedCount} · generated{" "}
+                  {job.phase ? `${job.phase.replaceAll("_", " ")} · ` : ""}target {job.requestedCount} · accepted {job.acceptedCount} · generated{" "}
                   {job.producedCount} · flagged {job.duplicateCount} · {job.backfillRound} call
                   {job.backfillRound === 1 ? "" : "s"} of {job.batchSize}/batch
                   {job.costUsd != null && ` · ~$${job.costUsd.toFixed(4)}`}
@@ -514,14 +542,14 @@ export function GenerationPanel({
                   <Flag className="size-3" />
                   Review batch
                 </button>
-                {job.status === "queued" && (
+                {(["queued", "running"].includes(job.status) || (job.status === "partial" && job.acceptedCount < job.requestedCount)) && (
                   <button
                     type="button"
                     onClick={() => void createAndRunFrom(job.id)}
                     disabled={running || !configured}
                     className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-200 disabled:opacity-50"
                   >
-                    Resume
+                    {job.phase === "awaiting_approval" ? "Review plan" : "Resume"}
                   </button>
                 )}
               </li>
@@ -533,14 +561,75 @@ export function GenerationPanel({
   );
 
   /** Resume an existing queued job (e.g. after a closed tab). */
-  async function createAndRunFrom(jobId: string) {
+  async function pollWorkflow(jobId: string, untilPlan = false) {
+    let lastSignature = "";
+    for (let poll = 0; poll < 450; poll++) {
+      const response = await fetchWithTimeout(`/api/admin/generation-jobs/${jobId}`);
+      const detail = await response.json() as { job?: Job; error?: { message: string } };
+      if (!response.ok || !detail.job) throw new Error(detail.error?.message ?? "Could not read generation progress.");
+      const job = detail.job;
+      const signature = `${job.phase}:${job.backfillRound}:${job.status}`;
+      if (signature !== lastSignature) {
+        lastSignature = signature;
+        await refetch();
+        setBatchRefresh((n) => n + 1);
+      }
+      if (["succeeded", "partial", "failed", "cancelled"].includes(job.status)) return;
+      if (job.phase === "awaiting_approval") return;
+      if (!untilPlan && job.phase !== "planning") {
+        setProgress({
+          jobId, status: job.status, phase: job.phase, requestedCount: job.requestedCount,
+          acceptedCount: job.acceptedCount, producedCount: job.producedCount,
+          validCount: job.validCount, duplicateCount: job.duplicateCount,
+          rawItemCount: job.rawItemCount, modelShortfallCount: 0,
+          schemaInvalidCount: job.schemaInvalidCount, contentInvalidCount: job.contentInvalidCount,
+          policyRejectedCount: job.policyRejectedCount, round: job.backfillRound,
+          totalPlannedCalls: Math.ceil(job.requestedCount / Math.max(1, job.batchSize)),
+          batchSize: job.batchSize, groundingCostUsd: job.groundingCostUsd,
+          groundingCached: job.groundingCached === 1, done: false, error: job.errorMessage,
+        });
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+    }
+    // Workflows keep running after this tab stops polling; Recent jobs can
+    // reconnect without making a duplicate provider call.
+    await refetch();
+  }
+
+  async function createAndRunFrom(jobId: string, preferredMode?: "workflow" | "manual") {
     setError(null);
     setRunningJobId(jobId);
     setBatchJobId(jobId);
     scrollToBatch();
     try {
-      for (let step = 0; step < 6; step++) {
-        const res = await fetch(`/api/admin/generation-jobs/${jobId}/step`, { method: "POST" });
+      const detailResponse = await fetchWithTimeout(`/api/admin/generation-jobs/${jobId}`);
+      const detail = await detailResponse.json() as { job?: Job; orchestration?: "workflow" | "manual"; error?: { message: string } };
+      if (!detailResponse.ok || !detail.job) throw new Error(detail.error?.message ?? "Could not read the generation job.");
+      const selectedJob = detail.job;
+      if ((preferredMode ?? detail.orchestration) === "workflow") {
+        if (!preferredMode) {
+          const recovered = await fetchWithTimeout(`/api/admin/generation-jobs/${jobId}/recover`, { method: "POST" });
+          const recovery = await recovered.json() as { orchestration?: "workflow" | "manual" };
+          if (recovered.ok && recovery.orchestration === "workflow") {
+            await pollWorkflow(jobId, selectedJob.phase === "planning");
+            return;
+          }
+        } else {
+          await pollWorkflow(jobId);
+          return;
+        }
+      }
+      if (selectedJob?.phase === "planning") {
+        const planRes = await fetchWithTimeout(`/api/admin/generation-jobs/${jobId}/plan`, { method: "POST" });
+        const planBody = await planRes.json() as { error?: { message: string } };
+        if (!planRes.ok) throw new Error(planBody.error?.message ?? "Could not build the generation plan.");
+        await refetch();
+        setBatchRefresh((n) => n + 1);
+        return;
+      }
+      if (selectedJob?.phase === "awaiting_approval") return;
+      for (let step = 0; step < 60; step++) {
+        const res = await fetchWithTimeout(`/api/admin/generation-jobs/${jobId}/step`, { method: "POST" });
         const body = (await res.json()) as { progress?: Progress; error?: { message: string } };
         if (!res.ok || !body.progress) {
           throw new Error(body.error?.message ?? "The generation step failed.");
@@ -558,4 +647,3 @@ export function GenerationPanel({
     }
   }
 }
-

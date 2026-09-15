@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "quizmaster-generation-workflow",
+  "main": "src/workers/generation-workflow.ts",
+  "compatibility_date": "2026-09-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "workflows": [
+    { "binding": "GENERATION_WORKFLOW", "name": "quizmaster-generation", "class_name": "GenerationWorkflow" }
+  ],
+  "d1_databases": [
+    { "binding": "DB", "database_name": "quizmaster-supreme-db", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
+  ],
+  "r2_buckets": [
+    { "binding": "STORAGE", "bucket_name": "quizmaster-supreme-assets" }
+  ],
+  "vars": { "APP_ENV": "production", "APP_BASE_URL": "", "DEFAULT_GENERATION_MODEL": "deepseek/deepseek-v4.1-flash", "EMBEDDING_MODEL": "@cf/baai/bge-m3" },
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 0.01 }
+  }
+}

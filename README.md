@@ -26,33 +26,36 @@ the existing question they matched** — so the reviewer can inspect and overrid
 | ORM | Drizzle ORM + Drizzle Kit |
 | Search | D1 **FTS5** (virtual table + triggers) |
 | Dedupe | Exact hash (L1) → FTS5 + Jaccard (L2), at write time; duplicates flagged, not hidden |
-| AI generation | OpenRouter behind a transport-agnostic pipeline; count-sized output budget + backfill rounds |
-| Tests | Vitest (unit) + real local D1 (integration) — **259 tests** |
+| AI generation | Approved coverage blueprint → leased, source-aware batches → full-funnel review |
+| Tests | Vitest (unit) + real local D1 (integration) — **309 tests** |
 
 ## Current status
 
 **M0–M14 implemented, then simplified by the revamp — all verified locally.**
 See `PLAN.md` §0.1 for the as-built status and §20 for the roadmap. Highlights:
 
-- ✅ Full schema with migrations (18 tables), FTS5, CHECK / partial-unique constraints
+- ✅ Full schema with migrations (21 tables), FTS5, CHECK / partial-unique constraints
 - ✅ Google-only auth (OIDC + PKCE), D1 sessions, admin role gate
 - ✅ Admin: categories, quiz sets, questions, set membership — CRUD with validation + audit trail
 - ✅ The question funnel: validate → normalize → dedupe (layers 1–2) → insert on every write path
 - ✅ Quiz runner (timed mock exams, resume, server-owned clock), results, history, dashboard, search
 - ✅ CSV import/export with dry run, bulk status changes
-- ✅ AI generation: a target count runs as small batches (25/call, editable) that are each
-  filtered against the whole bank and refilled until the target is met; duplicates are shown,
-  rejected by default and overridable; coverage-aware prompts; one-click add-to-set; the
-  batch review opens itself when a run finishes; per-batch regenerate and selection-based commit
-- ✅ Optional web grounding (OpenRouter `web` plugin, off by default): ONE cached research
-  call per job builds a shared fact sheet every batch reuses — search is billed per request,
-  so it is never enabled on the generation calls themselves
+- ✅ Plan-first AI generation: build and edit a coverage blueprint, approve its quotas, then
+  run leased batches with persisted directives and source-fact IDs. Every response item is
+  counted as accepted, duplicate-flagged, schema/content-invalid, or policy-rejected; short
+  deliveries and policy stalls have distinct stop reasons. Review opens when generation stops,
+  and only a terminal job can be committed to a set.
+- ✅ Optional grounding for planned jobs uses OpenRouter's current server-side web-search
+  tool or administrator-provided public sources; fetched references are bounded and stored as
+  cited source facts. Legacy unplanned jobs still use the old `web` plugin path.
 - ✅ M14 hardening: rate limits, error boundaries, backup/restore (rehearsed by test), staging config,
   keyboard accessibility (skip link, focus management, live regions)
 
-**Never run on a deployed Worker.** Everything is verified against local D1 with `vinext dev`.
-The live OpenRouter, Google login and deploy round-trips still need real
-credentials/resources — see "Deploying".
+**Not yet live-validated on a deployed Worker.** The deterministic paths are verified against
+local D1; the live OpenRouter, Google login and deploy round-trips still need real
+credentials/resources. Browser-driven leased steps recover after an expired request, but
+automatic production continuation after a closed browser still needs Workflow deployment.
+See "Deploying" and [`plan1.md`](./plan1.md).
 
 ## Getting started
 
@@ -204,22 +207,37 @@ class names like `bg-${color}-50`.
 
 ## Deploying
 
-Not yet deployed — `wrangler.jsonc` carries a placeholder D1 `database_id`, and the
-`vectorize`/`ai` bindings stay commented until those resources exist (uncommenting them
-before creation breaks local dev).
+Not yet deployed — development, staging and production config files still contain
+placeholder D1 IDs, and the separate Workflow Worker needs matching D1/R2 resources
+and secrets. `pnpm deploy` now uses `wrangler.production.jsonc`; `pnpm dev` keeps
+`wrangler.jsonc` with the manual lease loop. The `vectorize`/`ai` bindings stay
+commented until those resources exist.
 
 ```bash
-wrangler d1 create quizmaster-supreme-db      # paste the UUID into wrangler.jsonc
-pnpm db:migrate:remote
-# .dev.vars → real secrets: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, SESSION_SECRET,
-# OPENROUTER_API_KEY (CLI secrets for production: `wrangler secret put ...`)
-pnpm deploy
+wrangler d1 create quizmaster-supreme-db
+# Fill the same D1 UUID in wrangler.jsonc, wrangler.production.jsonc,
+# and wrangler.workflow.jsonc; create the matching production R2 bucket.
+pnpm db:migrate:remote     # apply 0009 before either Worker reads/writes it
+# Set OPENROUTER_API_KEY and GENERATION_ORCHESTRATION_TOKEN on both Workers.
+# Set Google/session secrets and real APP_BASE_URL/GOOGLE_CLIENT_ID on the app.
+pnpm workflow:dry-run
+pnpm exec wrangler deploy --config wrangler.workflow.jsonc
+pnpm deploy              # deploy the vinext Worker after the Workflow Worker
 ```
 
 Required before a production launch (each item is called out in PLAN.md §0.1 as unverified):
 
 1. **Google OAuth** — real client id/secret, authorised JS origins + redirect URIs
    (`/api/auth/google/callback`), `googleEnabled()` gate off by default.
-2. **OpenRouter key** — without it, generation jobs cannot run past `queued`.
-3. **R2 bucket** — `quizmaster-supreme-assets` (raw model responses).
-5. **Staging round** — deploy staging, run the E2E flow there, then production.
+2. **OpenRouter key + orchestration token** — the same token must be secret-bound
+   to both Workers; if Workflow dispatch is unavailable, the UI visibly falls
+   back to manual leased steps. The Workflow Worker must have its own OpenRouter key.
+3. **R2 buckets** — production `quizmaster-supreme-assets`; staging uses
+   `quizmaster-supreme-assets-staging` so forensic artifacts do not mix.
+4. **Staging round** — migrate staging D1, deploy its Workflow Worker first,
+   deploy the staging app, then exercise plan/approve/generate/recover/cancel
+   and inspect D1/R2 counters before production.
+
+The Workflow code and both configurations package in dry runs; no live Workflow
+instance or paid OpenRouter call has been validated yet. See
+[`GENERATION-OPERATIONS.md`](./GENERATION-OPERATIONS.md) for incident and retention notes.

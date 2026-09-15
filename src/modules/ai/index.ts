@@ -14,6 +14,8 @@ export {
   listCandidates,
   listJobCandidates,
   listJobBatches,
+  listJobRejections,
+  listJobSourceFacts,
   getCandidate,
   setCandidateRejected,
   commitJobToSet,
@@ -26,6 +28,19 @@ export {
   type RawStorage,
   type CandidateWithJob,
 } from "./pipeline";
+
+export {
+  planGenerationJob,
+  saveGenerationPlan,
+  approveGenerationPlan,
+  listGenerationSegments,
+  blueprintOf,
+  GenerationBlueprintSchema,
+  canonicalizeBlueprint,
+  PLANNER_PROMPT_VERSION,
+  type GenerationBlueprint,
+  type BatchDirective,
+} from "./planner";
 
 export {
   outputBudgetFor,

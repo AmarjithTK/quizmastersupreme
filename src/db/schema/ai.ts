@@ -14,7 +14,7 @@
  */
 
 import { sql } from "drizzle-orm";
-import { check, index, integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { check, index, integer, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 import { categories, quizSets } from "./content";
 
 export const aiGenerationJobs = sqliteTable(
@@ -58,6 +58,21 @@ export const aiGenerationJobs = sqliteTable(
     temperature: real("temperature"),
     promptVersion: text("prompt_version").notNull(),
 
+    // ── Generation planner (0009) ─────────────────────────────────────────
+    /** Fine-grained lifecycle without rebuilding the legacy status CHECK. */
+    phase: text("phase"),
+    plannerVersion: text("planner_version"),
+    planRevision: integer("plan_revision").notNull().default(0),
+    /** Canonical, schema-validated GenerationBlueprint JSON. */
+    blueprintJson: text("blueprint_json"),
+    blueprintHash: text("blueprint_hash"),
+    planApprovedBy: text("plan_approved_by"),
+    planApprovedAt: integer("plan_approved_at"),
+    plannerPromptTokens: integer("planner_prompt_tokens"),
+    plannerCompletionTokens: integer("planner_completion_tokens"),
+    plannerCostUsd: real("planner_cost_usd"),
+    plannerRawResponseKey: text("planner_raw_response_key"),
+
     /** Exactly what was sent to the model. Non-negotiable for cost attribution. */
     coverageDigest: text("coverage_digest"),
     coverageTokens: integer("coverage_tokens"),
@@ -74,6 +89,17 @@ export const aiGenerationJobs = sqliteTable(
     backfillRound: integer("backfill_round").notNull().default(0),
     /** Duplicates dropped by the insert-time bank check as well. */
     duplicateSkipped: integer("duplicate_skipped").notNull().default(0),
+
+    /** Full-funnel totals. Every raw item reconciles into exactly one outcome. */
+    rawItemCount: integer("raw_item_count").notNull().default(0),
+    modelShortfallCount: integer("model_shortfall_count").notNull().default(0),
+    schemaInvalidCount: integer("schema_invalid_count").notNull().default(0),
+    contentInvalidCount: integer("content_invalid_count").notNull().default(0),
+    policyRejectedCount: integer("policy_rejected_count").notNull().default(0),
+
+    /** Request-step lease: prevents concurrent provider calls and enables recovery. */
+    leaseToken: text("lease_token"),
+    leaseExpiresAt: integer("lease_expires_at"),
 
     // ── P0: small-batch generation loop (0007) ────────────────────────────
     /** THE target: how many clean (unflagged) questions the job is driving for. */
@@ -142,6 +168,26 @@ export const aiGenerationBatches = sqliteTable(
     accepted: integer("accepted").notNull().default(0),
     /** Questions stored but rejected by default (duplicates). */
     flagged: integer("flagged").notNull().default(0),
+    /** Exact directive rendered from the approved plan and current ledger. */
+    directiveJson: text("directive_json"),
+    directiveHash: text("directive_hash"),
+    planRevision: integer("plan_revision").notNull().default(0),
+    rawItemCount: integer("raw_item_count").notNull().default(0),
+    modelShortfallCount: integer("model_shortfall_count").notNull().default(0),
+    schemaValidCount: integer("schema_valid_count").notNull().default(0),
+    schemaInvalidCount: integer("schema_invalid_count").notNull().default(0),
+    contentValidCount: integer("content_valid_count").notNull().default(0),
+    contentInvalidCount: integer("content_invalid_count").notNull().default(0),
+    policyValidCount: integer("policy_valid_count").notNull().default(0),
+    policyRejectedCount: integer("policy_rejected_count").notNull().default(0),
+    duplicateFlaggedCount: integer("duplicate_flagged_count").notNull().default(0),
+    responseFormatMode: text("response_format_mode"),
+    finishReason: text("finish_reason"),
+    parseRepair: text("parse_repair"),
+    attemptNo: integer("attempt_no").notNull().default(1),
+    leaseToken: text("lease_token"),
+    requestManifestKey: text("request_manifest_key"),
+    rawProviderResponseKey: text("raw_provider_response_key"),
     promptTokens: integer("prompt_tokens"),
     completionTokens: integer("completion_tokens"),
     costUsd: real("cost_usd"),
@@ -185,6 +231,16 @@ export const aiCandidates = sqliteTable(
     topic: text("topic"),
     tags: text("tags"),
 
+    // ── Planner coverage metadata (0009) ──────────────────────────────────
+    segmentId: text("segment_id"),
+    entityKey: text("entity_key"),
+    factKey: text("fact_key"),
+    questionType: text("question_type"),
+    sourceIdsJson: text("source_ids_json"),
+    rejectionKind: text("rejection_kind"),
+    rejectionReason: text("rejection_reason"),
+    planRevision: integer("plan_revision").notNull().default(0),
+
     /**
      * The reviewer's decision. Defaults to 1 for anything the dedupe funnel
      * flagged, so a duplicate arrives rejected-by-default but visible and
@@ -210,6 +266,85 @@ export const aiCandidates = sqliteTable(
     index("ix_candidates_created").on(t.createdAt),
     check("ck_candidates_correct_key", sql`${t.correctOptionKey} in ('A','B','C','D','E')`),
     check("ck_candidates_rejected", sql`${t.rejected} in (0,1)`),
+  ],
+);
+
+/** Queryable copy of every canonical blueprint segment and its live ledger. */
+export const aiGenerationSegments = sqliteTable(
+  "ai_generation_segments",
+  {
+    id: text("id").primaryKey(),
+    jobId: text("job_id")
+      .notNull()
+      .references(() => aiGenerationJobs.id, { onDelete: "cascade" }),
+    planRevision: integer("plan_revision").notNull(),
+    key: text("key").notNull(),
+    label: text("label").notNull(),
+    intent: text("intent").notNull(),
+    targetCount: integer("target_count").notNull(),
+    priority: integer("priority").notNull().default(1),
+    acceptedCount: integer("accepted_count").notNull().default(0),
+    rejectedCount: integer("rejected_count").notNull().default(0),
+    invalidCount: integer("invalid_count").notNull().default(0),
+    sourceFactCount: integer("source_fact_count").notNull().default(0),
+    policyJson: text("policy_json").notNull(),
+    sourceQueriesJson: text("source_queries_json").notNull(),
+    sourceRequirementsJson: text("source_requirements_json").notNull(),
+    status: text("status").notNull().default("pending"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    index("ix_generation_segments_job").on(t.jobId, t.planRevision),
+    uniqueIndex("ux_generation_segments_key").on(t.jobId, t.planRevision, t.key),
+    check("ck_generation_segments_status", sql`${t.status} in ('pending','active','complete','source_limited')`),
+  ],
+);
+
+/** Structured, cited facts built after plan approval and assigned to segments. */
+export const aiSourceFacts = sqliteTable(
+  "ai_source_facts",
+  {
+    id: text("id").primaryKey(),
+    jobId: text("job_id")
+      .notNull()
+      .references(() => aiGenerationJobs.id, { onDelete: "cascade" }),
+    segmentId: text("segment_id").references(() => aiGenerationSegments.id, {
+      onDelete: "cascade",
+    }),
+    entityKey: text("entity_key"),
+    claim: text("claim").notNull(),
+    sourceUrl: text("source_url").notNull(),
+    sourceTitle: text("source_title").notNull(),
+    publishedAt: text("published_at"),
+    freshness: text("freshness").notNull().default("stable"),
+    retrievedAt: integer("retrieved_at").notNull(),
+  },
+  (t) => [index("ix_source_facts_job_segment").on(t.jobId, t.segmentId)],
+);
+
+/** Invalid or policy-rejected model items: forensic evidence, never silent loss. */
+export const aiGenerationRejections = sqliteTable(
+  "ai_generation_rejections",
+  {
+    id: text("id").primaryKey(),
+    jobId: text("job_id")
+      .notNull()
+      .references(() => aiGenerationJobs.id, { onDelete: "cascade" }),
+    batchId: text("batch_id")
+      .notNull()
+      .references(() => aiGenerationBatches.id, { onDelete: "cascade" }),
+    batchNo: integer("batch_no").notNull(),
+    modelIndex: integer("model_index").notNull(),
+    stage: text("stage").notNull(),
+    code: text("code").notNull(),
+    reasonsJson: text("reasons_json").notNull(),
+    rawJson: text("raw_json"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    index("ix_generation_rejections_job_batch").on(t.jobId, t.batchNo, t.stage),
+    check("ck_generation_rejections_stage", sql`${t.stage} in ('schema','content','policy')`),
   ],
 );
 
@@ -242,3 +377,8 @@ export type AiGenerationBatch = typeof aiGenerationBatches.$inferSelect;
 export type NewAiGenerationBatch = typeof aiGenerationBatches.$inferInsert;
 export type AiCandidate = typeof aiCandidates.$inferSelect;
 export type NewAiCandidate = typeof aiCandidates.$inferInsert;
+export type AiGenerationSegment = typeof aiGenerationSegments.$inferSelect;
+export type NewAiGenerationSegment = typeof aiGenerationSegments.$inferInsert;
+export type AiSourceFact = typeof aiSourceFacts.$inferSelect;
+export type NewAiSourceFact = typeof aiSourceFacts.$inferInsert;
+export type AiGenerationRejection = typeof aiGenerationRejections.$inferSelect;
